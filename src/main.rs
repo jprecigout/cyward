@@ -21,6 +21,7 @@ mod detect;
 mod llm;
 mod logs;
 mod names;
+mod notify;
 mod stats;
 mod web;
 
@@ -85,6 +86,8 @@ enum Command {
     Interfaces,
     /// Vérifie que le modèle répond, avec une alerte d'exemple.
     CheckLlm,
+    /// Envoie une notification de test sur chaque canal configuré ([[notify.channels]]).
+    CheckNotify,
 }
 
 // `#[tokio::main]` crée le runtime asynchrone multi-thread qui exécute toutes les tâches.
@@ -119,6 +122,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&a)?);
             Ok(())
         }
+        Command::CheckNotify => notify::check(&cfg.notify).await,
         Command::Run { interface, no_capture, no_logs, no_llm } => {
             // Les options de la ligne de commande l'emportent sur le fichier de configuration.
             if let Some(i) = interface {
@@ -177,7 +181,9 @@ fn banner_info(cfg: &Config, capture: String, baseline: Option<&Baseline>) -> Ve
             format!("{mode} · {model}")
         }
     };
-    vec![("Dashboard", dashboard), ("Capture", capture), ("Logs", logs), ("Modèle IA", model), ("Normalité", normality)]
+    // Ex. « 2 canal(aux) » ; les adresses ne sont pas affichées, car elles peuvent contenir un secret.
+    let notifications = if cfg.notify.enabled { format!("{} canal(aux)", cfg.notify.channels.len()) } else { "désactivées".to_string() };
+    vec![("Dashboard", dashboard), ("Capture", capture), ("Logs", logs), ("Modèle IA", model), ("Normalité", normality), ("Notifications", notifications)]
 }
 
 /// Ouvre l'apprentissage du comportement normal s'il est activé (et recharge son état disque).
@@ -199,6 +205,9 @@ fn start_pipeline(cfg: &Config, stats: &Arc<Stats>, baseline: Option<Arc<Baselin
     let sink = AlertSink::new(store.clone(), triage, cfg.llm.min_severity);
     if let Some(b) = &baseline {
         anomaly::trainer::spawn(b.clone(), sink.clone());
+    }
+    if cfg.notify.enabled {
+        notify::spawn(cfg.notify.clone(), store.clone())?;
     }
 
     // Le serveur web tourne dans sa propre tâche ; une erreur (port occupé…) est journalisée

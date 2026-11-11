@@ -5,7 +5,7 @@
 //! ce qui permet un fichier minimal (ou pas de fichier du tout). Les valeurs par défaut
 //! sont reproduites et commentées dans `config.example.toml`.
 
-use std::{net::IpAddr, path::Path};
+use std::{collections::HashMap, net::IpAddr, path::Path};
 
 use anyhow::{Context, Result};
 use ipnet::IpNet;
@@ -23,6 +23,7 @@ pub struct Config {
     pub llm: LlmConfig,
     pub web: WebConfig,
     pub names: NamesConfig,
+    pub notify: NotifyConfig,
 }
 
 impl Config {
@@ -426,4 +427,67 @@ impl Default for NamesConfig {
     fn default() -> Self {
         Self { enabled: true, external: false, nameserver: String::new(), timeout_ms: 1000, cache_secs: 3600 }
     }
+}
+
+/// Section `[notify]` : notifications (ntfy, webhook) des attaques jugées malveillantes ou suspectes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct NotifyConfig {
+    pub enabled: bool,
+    /// Verdicts de l'IA qui déclenchent une notification (en minuscules).
+    pub verdicts: Vec<String>,
+    /// Confiance minimale du verdict, entre 0 et 1.
+    pub min_confidence: f64,
+    /// À partir de cette sévérité, notification immédiate, sans attendre le verdict de l'IA.
+    pub immediate_severity: Severity,
+    /// Sévérité minimale d'une alerte notifiée faute de verdict (IA hors ligne, en échec ou désactivée).
+    pub fallback_severity: Severity,
+    /// Attente du verdict avant la notification de repli, en secondes (0 = jamais de repli).
+    pub fallback_after_secs: u64,
+    /// Nombre maximal de notifications par heure ; au-delà, un résumé unique est envoyé.
+    pub max_per_hour: usize,
+    /// Adresse du dashboard vue depuis le téléphone, pour le lien de la notification (vide = pas de lien).
+    pub dashboard_url: String,
+    /// Canaux de notification (`[[notify.channels]]`).
+    pub channels: Vec<ChannelConfig>,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            verdicts: vec!["malveillant".into(), "suspect".into()],
+            min_confidence: 0.6,
+            immediate_severity: Severity::Critical,
+            fallback_severity: Severity::High,
+            // 10 minutes : un modèle 8B sur CPU, qui traite une alerte à la fois, peut prendre plusieurs minutes.
+            fallback_after_secs: 600,
+            max_per_hour: 20,
+            dashboard_url: String::new(),
+            channels: Vec::new(),
+        }
+    }
+}
+
+/// Un canal de notification, choisi par la clé `type`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ChannelConfig {
+    /// Serveur ntfy (auto-hébergé ou ntfy.sh), publication en JSON.
+    Ntfy {
+        /// Adresse du serveur, sans le sujet (ex. `http://127.0.0.1:8090`).
+        url: String,
+        /// Sujet auquel le téléphone est abonné.
+        topic: String,
+        /// Jeton d'accès ntfy (`tk_…`), vide si le sujet est public.
+        #[serde(default)]
+        token: String,
+    },
+    /// Requête POST JSON vers une adresse quelconque (Discord, Slack, Gotify, Home Assistant, n8n…).
+    Webhook {
+        url: String,
+        /// En-têtes HTTP ajoutés à la requête (ex. `Authorization`).
+        #[serde(default)]
+        headers: HashMap<String, String>,
+    },
 }

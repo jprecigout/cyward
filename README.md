@@ -136,6 +136,9 @@ cyward/
     │   └── rules.rs           # trait LogRule et règles d'analyse              ①
     ├── llm.rs                 # client du modèle, prompt, décodage du verdict  ⑤
     ├── names.rs               # noms des machines (DNS inverse, avec cache)
+    ├── notify.rs              # notifications : décision, plafond, envoi        ④ ⑤
+    ├── notify/
+    │   └── channels.rs        # trait Notifier : ntfy, webhook générique       ①
     └── web.rs                 # serveur HTTP, API JSON, flux SSE               ④ ⑥
 ```
 
@@ -184,6 +187,12 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 **`web.rs`** — observateur ④ (flux SSE), Middleware ⑥
 - Serveur `axum`. Il sert le dashboard, une API JSON et un flux Server-Sent Events pour les mises à jour en direct.
 
+**`notify.rs`** — observateur ④, producteur/consommateur ⑤ ; `notify/channels.rs` — Strategy ①
+- Envoie une notification (ntfy, webhook générique) pour les attaques jugées malveillantes ou suspectes par l'IA, pour les alertes critiques sans attendre l'IA, et en repli pour les alertes graves restées sans verdict. Une alerte n'est notifiée qu'une fois, avec un plafond horaire.
+- S'abonne aux événements de l'`AlertStore`, comme le dashboard : ni les détecteurs ni le LLM ne le connaissent.
+- La décision (`Dispatcher`) est pure et testée sans réseau ; l'envoi tourne dans une autre tâche, derrière une file bornée, avec trois essais. Chaque canal implémente `trait Notifier`, qui construit la requête HTTP propre au service.
+- Détails : section 7, `[notify]`.
+
 **`names.rs`**
 - Donne le nom des machines (DNS inverse, enregistrement PTR) affiché à côté des adresses dans le dashboard, via `GET /api/names`. Rien n'est résolu sur le chemin de la détection, et les alertes ne changent pas.
 - Construction de la requête et lecture de la réponse DNS sont des fonctions pures (testées sans réseau, réponses piégées comprises) ; seul l'échange UDP avec le serveur fait des I/O.
@@ -209,6 +218,7 @@ Les dépendances vont dans un seul sens : les **producteurs** d'alertes (`detect
 | `llm.rs` | `alert`, `config`, `stats` | `detect`, `logs`, `web` |
 | `web.rs` | `alert`, `anomaly`, `names`, `stats` | `detect`, `logs`, `llm` |
 | `names.rs` | `alert` (`host_part`), `config` | `detect`, `logs`, `llm`, `web` |
+| `notify.rs` (et `notify/channels.rs`) | `alert`, `config` | `detect`, `logs`, `llm`, `web` |
 | `main.rs` | tous | — |
 
 `main.rs` est la **racine de composition** : c'est le seul endroit qui crée les composants et les relie entre eux (canaux, `Arc` partagés). Changer de serveur LLM, ou désactiver le triage IA, ne demande donc aucune modification des détecteurs.
@@ -246,11 +256,11 @@ Cyward est construit sur **9 design patterns**. Le schéma montre où chacun int
 
 | # | Pattern | Où | Problème résolu dans Cyward |
 |---|---|---|---|
-| ① | **Strategy** | `trait Detector`, `Engine` (`src/detect/`) ; `trait LogRule`, `LogAnalyzer` (`src/logs/rules.rs`) | Ajouter une détection réseau (y compris l'apprentissage du comportement normal) ou une règle de log sans toucher au code existant |
+| ① | **Strategy** | `trait Detector`, `Engine` (`src/detect/`) ; `trait LogRule`, `LogAnalyzer` (`src/logs/rules.rs`) ; `trait Notifier` (`src/notify/channels.rs`) | Ajouter une détection réseau (y compris l'apprentissage du comportement normal), une règle de log ou un canal de notification sans toucher au code existant |
 | ② | **Builder** | `Alert::new(...).src(...)...` (`src/alert.rs`) | Construire lisiblement une alerte aux nombreux champs optionnels |
 | ③ | **Façade** | `AlertSink::emit` (`src/alert.rs`) ; `Baseline` (`src/anomaly/baseline.rs`) | Un point d'entrée unique qui masque un sous-système : stockage et triage des alertes ; cycle de vie du comportement normal |
-| ④ | **Observer** | `AlertStore` + canal `broadcast` → SSE (`src/alert.rs`, `src/web.rs`) | Prévenir un nombre inconnu de navigateurs à chaque changement |
-| ⑤ | **Producteur/consommateur** | canaux `mpsc` (`main.rs`, `capture.rs`, `logs.rs`, `llm.rs`) | Découpler des étages de vitesses très différentes |
+| ④ | **Observer** | `AlertStore` + canal `broadcast` → SSE (`src/alert.rs`, `src/web.rs`), notifications (`src/notify.rs`) | Prévenir un nombre inconnu de navigateurs, et le service de notifications, à chaque changement |
+| ⑤ | **Producteur/consommateur** | canaux `mpsc` (`main.rs`, `capture.rs`, `logs.rs`, `llm.rs`, `notify.rs`) | Découpler des étages de vitesses très différentes |
 | ⑥ | **Middleware** | `auth`, `write_guard` (`src/web.rs`) | Appliquer le contrôle d'accès à toutes les routes, et un contrôle renforcé aux routes d'écriture, en un seul endroit |
 | ⑦ | **Superviseur** | `logs::supervise` (`src/logs.rs`) | Relancer une source de logs qui s'arrête |
 | ⑧ | **Racine de composition** | `start_pipeline`, `run` (`src/main.rs`) | Injecter les dépendances au lieu d'un état global |
@@ -345,7 +355,7 @@ pub fn emit(&self, alert: Alert) {
 **Rôles dans Cyward :**
 - **Sujet** : `AlertStore`, qui possède l'émetteur `events: broadcast::Sender<AlertEvent>`.
 - **Événements** : `AlertEvent::New` et `AlertEvent::Update`.
-- **Observateurs** : chaque connexion SSE d'un navigateur. Elle s'abonne avec `subscribe()` et reçoit une copie de chaque événement.
+- **Observateurs** : chaque connexion SSE d'un navigateur, et la tâche des notifications (`notify::watch`). Chacun s'abonne avec `subscribe()` et reçoit une copie de chaque événement.
 
 ```rust
 // src/alert.rs — le sujet publie à chaque création ou mise à jour
@@ -355,7 +365,7 @@ let _ = self.events.send(AlertEvent::New(alert.clone()));
 let stream = BroadcastStream::new(s.store.subscribe()) /* … → événements SSE */;
 ```
 
-**Utilisation** : un nouveau consommateur en temps réel (export vers un SIEM, notifications) s'abonne avec `store.subscribe()`, sans modifier le store ni les détecteurs.
+**Utilisation** : un nouveau consommateur en temps réel (export vers un SIEM…) s'abonne avec `store.subscribe()`, sans modifier le store ni les détecteurs. C'est ainsi que les notifications ont été ajoutées : l'arrivée du verdict de l'IA est un simple `Update`.
 
 #### ⑤ Producteur/consommateur : le pipeline par canaux
 
@@ -367,6 +377,7 @@ let stream = BroadcastStream::new(s.store.subscribe()) /* … → événements S
 | Rejeu de pcap (`capture::replay`) | `PacketMeta`, 4 096 | Moteur | `send().await` : on attend, aucun paquet n'est perdu. |
 | Sources de logs (`logs::follow`) | `LogLine`, 4 096 | `LogAnalyzer` | `send().await` : on attend. |
 | `AlertSink::emit` | identifiants d'alerte, `llm.queue_size` | Worker LLM (`llm.rs`) | `try_send` : l'alerte reste visible mais n'est pas analysée. La détection ne ralentit jamais à cause du LLM. |
+| Décision des notifications (`notify::watch`) | `Notification`, 64 | Envoi (`notify::deliver`) | `try_send` : la notification est abandonnée (avec un avertissement). Un service de notification en panne ne bloque rien. |
 
 ```rust
 // src/capture.rs — producteur qui ne doit jamais bloquer
@@ -798,6 +809,7 @@ docker compose run --rm --no-deps cyward
 | `cyward replay capture.pcap` | Passe un pcap dans les détecteurs, affiche les alertes et quitte |
 | `cyward replay capture.pcap --serve` | Idem, puis garde le dashboard et le triage IA actifs |
 | `cyward check-llm` | Teste la connexion au modèle |
+| `cyward check-notify` | Envoie une notification de test sur chaque canal de `[notify]` |
 
 Sans `-c`, toutes les valeurs par défaut s'appliquent.
 
@@ -979,6 +991,47 @@ Noms des machines affichés à côté des adresses, obtenus par DNS inverse (PTR
 | `timeout_ms` | `1000` | Délai maximal d'une résolution, en millisecondes |
 | `cache_secs` | `3600` | Durée de conservation d'un nom trouvé, en secondes (une absence de nom est gardée 5 minutes) |
 
+### `[notify]`
+
+Notifications des attaques sur ton téléphone ([ntfy](https://ntfy.sh)) ou vers n'importe quel service qui accepte un webhook. Une alerte est notifiée **une seule fois**, dès que l'une de ces conditions est remplie :
+
+1. le **verdict de l'IA** est dans `verdicts` avec une confiance d'au moins `min_confidence` ;
+2. sa **sévérité** atteint `immediate_severity` : on n'attend pas l'IA, qui peut mettre plusieurs minutes ;
+3. **repli** : sévérité d'au moins `fallback_severity` mais pas de verdict après `fallback_after_secs` (IA hors ligne). Si aucun verdict ne peut venir (IA désactivée, analyse en échec, file d'analyse pleine), la notification part sans attendre le délai.
+
+| Clé | Défaut | Description |
+|---|---|---|
+| `enabled` | `false` | Activer les notifications |
+| `verdicts` | `["malveillant", "suspect"]` | Verdicts de l'IA qui déclenchent une notification |
+| `min_confidence` | `0.6` | Confiance minimale du verdict (0 à 1) |
+| `immediate_severity` | `"critical"` | Sévérité notifiée sans attendre l'IA |
+| `fallback_severity` | `"high"` | Sévérité minimale d'une notification de repli |
+| `fallback_after_secs` | `600` | Attente du verdict avant le repli, en secondes (0 = jamais de repli) |
+| `max_per_hour` | `20` | Plafond de notifications par heure ; au-delà, un résumé unique est envoyé dès que possible |
+| `dashboard_url` | `""` | Adresse du dashboard vue depuis le téléphone (ex. `http://192.168.1.2:8080/`) : la notification ouvre directement l'alerte. Si `web.token` est défini, tu peux y ajouter `?token=…`, mais le jeton passe alors par le service de notification : à réserver à un ntfy auto-hébergé |
+| `channels` | `[]` | Canaux, voir ci-dessous |
+
+Les canaux, autant que tu veux, chacun dans une section `[[notify.channels]]` :
+
+```toml
+# ntfy (auto-hébergé ou ntfy.sh) : l'appli ntfy du téléphone s'abonne au sujet.
+[[notify.channels]]
+type = "ntfy"
+url = "http://127.0.0.1:8090"   # le serveur, sans le sujet
+topic = "cyward"
+token = "tk_…"                  # jeton d'accès ntfy ; vide si le sujet est public
+
+# Webhook générique : POST JSON.
+[[notify.channels]]
+type = "webhook"
+url = "https://discord.com/api/webhooks/…"
+headers = { Authorization = "Bearer …" }   # facultatif
+```
+
+Le corps JSON du webhook est accepté tel quel par plusieurs services : `title`, `message` et `priority` (1 à 5) pour Gotify, `text` pour Slack, `content` pour Discord (avec les mentions désactivées). Il contient aussi `reason` (`verdict`, `severity`, `no_verdict`, `throttled`, `test`), `url` et l'alerte complète (`alert`) pour une automatisation (n8n, Home Assistant, SIEM). Les textes venus du réseau sont nettoyés (caractères de contrôle) et envoyés en texte brut.
+
+Vérifie la configuration avec `cyward check-notify`, qui envoie une notification de test sur chaque canal.
+
 ---
 
 ## 8. Le dashboard et l'API
@@ -995,6 +1048,7 @@ Ouvre `http://127.0.0.1:8080`, ou `http://hôte:8080/?token=…` si un jeton est
 - **Panneau « Comportement normal »** (si l'apprentissage est activé) : modèle actif ou progression de l'apprentissage (avec une barre d'avancement), fenêtres par statut, bouton « Lancer un apprentissage », retour à une version précédente. Quand un modèle candidat attend, son diff s'affiche machine par machine, avec « Accepter » ou « Refuser » pour chacune, « Tout accepter », « Tout refuser », et les machines peu actives repliées. Suivent les exceptions actives et les dernières décisions.
 - **Question « est-ce normal ? »** : dans le détail d'une anomalie, un motif, une portée, et les boutons « C'est normal » et « C'est suspect ». La réponse donnée s'affiche ensuite à la place.
 - **Liste des alertes** : mise à jour en direct, sans recharger la page. Le titre de la section indique combien d'alertes sont affichées. Une nouvelle alerte s'illumine brièvement. Le badge indique l'état du triage : en attente, verdict avec confiance, ou échec.
+- **Lien d'une notification** (`…/#alerte-12`) : le dashboard s'ouvre sur cette alerte, dépliée, filtres remis à zéro.
 - **Détail d'une alerte**, en cliquant dessus :
   - à gauche : description, source, cible, dates, occurrences et preuves brutes en JSON ;
   - à droite : l'analyse de l'IA, avec verdict, jauge de confiance, explication, liens vers les fiches MITRE ATT&CK et recommandations numérotées.
@@ -1229,6 +1283,8 @@ Le verdict « bénin » de l'IA aide à repérer ces cas, mais vérifie toujours
 | Analyses toujours en échec (délai dépassé) | Machine trop lente : monte `llm.timeout_secs`, utilise une quantification plus petite (Q3_K_M), ou un GPU |
 | Le compteur « Perdus » augmente | Le moteur ne suit pas le débit : compile en `--release`, monte `capture.queue_size` |
 | Aucun paquet sur un port miroir | Vérifie `promiscuous = true`, l'interface choisie et la configuration du switch |
+| `ÉCHEC  ntfy … : HTTP status client error (403 Forbidden)` (`check-notify`) | Le jeton ntfy n'a pas le droit d'écrire sur ce sujet : vérifie `token` et les droits (`ntfy access`) |
+| Aucune notification malgré des alertes | `notify.enabled = true` ? Seules les alertes à verdict malveillant ou suspect, critiques, ou graves sans verdict sont notifiées ; vérifie aussi le plafond `max_per_hour` |
 | `fichier pcap invalide` | C'est probablement du pcapng : convertis-le avec `editcap -F pcap` |
 | `écoute sur 127.0.0.1:8080` échoue | Le port est pris (par exemple par llama-server) : change `web.listen` |
 

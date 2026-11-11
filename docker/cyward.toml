@@ -44,3 +44,15 @@ token = ""
 # utilise le résolveur de l'hôte (/etc/resolv.conf), donc les noms donnés par la box.
 enabled = true
 external = false
+
+[notify]
+# Notifications (ntfy, webhook) : voir config.example.toml. Tester avec
+#   docker compose run --rm --no-deps cyward check-notify
+# Avec le réseau de l'hôte, un ntfy de la même machine est joignable sur 127.0.0.1.
+enabled = false
+dashboard_url = ""
+# [[notify.channels]]
+# type = "ntfy"
+# url = "http://127.0.0.1:8090"
+# topic = "cyward"
+# token = ""

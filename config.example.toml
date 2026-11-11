@@ -116,3 +116,29 @@ external = false
 nameserver = ""
 timeout_ms = 1000
 cache_secs = 3600
+
+# Notifications des attaques malveillantes ou suspectes (ntfy, webhook). Tester avec : cyward check-notify
+[notify]
+enabled = false
+# Verdicts de l'IA notifiés, et confiance minimale (0 à 1).
+verdicts = ["malveillant", "suspect"]
+min_confidence = 0.6
+# Notifiée tout de suite, sans attendre l'IA.
+immediate_severity = "critical"
+# Repli : notifiée sans verdict au bout de ce délai (IA hors ligne), ou aussitôt si aucun verdict ne viendra.
+fallback_severity = "high"
+fallback_after_secs = 600
+max_per_hour = 20
+# Adresse du dashboard vue depuis le téléphone : la notification ouvre l'alerte.
+dashboard_url = ""
+
+# [[notify.channels]]
+# type = "ntfy"
+# url = "http://127.0.0.1:8090"
+# topic = "cyward"
+# token = ""
+
+# [[notify.channels]]
+# type = "webhook"
+# url = "https://exemple/webhook"
+# headers = { Authorization = "Bearer …" }

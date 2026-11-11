@@ -23,6 +23,7 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
   | `llm.rs` | `alert`, `config`, `stats` |
   | `web.rs` | `alert`, `anomaly`, `names`, `stats` |
   | `names.rs` | `alert`, `config` |
+  | `notify.rs` (et `notify/channels.rs`) | `alert`, `config` |
 
   Les producteurs d'alertes (`detect/`, `logs.rs`) ne dépendent jamais des consommateurs (`llm`, `web`), et inversement. `anomaly/` (apprentissage du comportement normal) ne dépend ni de `detect`, ni de `llm`, ni de `web` : ce sont eux qui l'utilisent. Seul `main.rs` assemble le tout (racine de composition).
 - **Logique pure séparée des entrées/sorties** : le parsing et la décision (`parse_packet`, `parse_dns_query`, `LogAnalyzer::analyze`, `parse_analysis`, les détecteurs, et dans `anomaly/` les caractéristiques, l'Isolation Forest et le diff) ne font aucune I/O. C'est ce qui les rend testables sans réseau, sans fichier, sans LLM. Les I/O (sockets, sous-processus, HTTP) restent en bordure.
@@ -30,10 +31,10 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
 
   | Pattern | Où | À réutiliser pour |
   |---|---|---|
-  | Strategy (trait + objets `Box<dyn …>`) | `trait Detector`, `Engine` ; `trait LogRule`, `LogAnalyzer` (`logs/rules.rs`) | Tout nouveau détecteur, règle de log ou analyseur interchangeable |
+  | Strategy (trait + objets `Box<dyn …>`) | `trait Detector`, `Engine` ; `trait LogRule`, `LogAnalyzer` (`logs/rules.rs`) ; `trait Notifier` (`notify/channels.rs`) | Tout nouveau détecteur, règle de log, canal de notification ou analyseur interchangeable |
   | Builder | `Alert::new(...).src(...).dst(...).evidence(...)` | Construire des objets à nombreux champs optionnels |
   | Façade / point d'entrée unique | `AlertSink::emit` ; `Baseline` (`anomaly/baseline.rs`) | Tout ce qui produit des alertes : ne jamais écrire directement dans le store ou la file LLM. Tout ce qui touche au comportement normal passe par `Baseline`, qui applique les garde-fous de validation |
-  | Observer (publication/abonnement) | `AlertStore` + `broadcast` → clients SSE | Diffuser des événements à plusieurs consommateurs |
+  | Observer (publication/abonnement) | `AlertStore` + `broadcast` → clients SSE, notifications (`notify.rs`) | Diffuser des événements à plusieurs consommateurs |
   | Producteur/consommateur (pipeline par canaux) | capture → moteur, sources de logs → analyseur, sink → LLM | Découpler un producteur rapide d'un consommateur lent (canal borné, `try_send` si le producteur ne doit pas bloquer) |
   | Middleware (chaîne de responsabilité) | `auth`, et `write_guard` sur les routes d'écriture (`web.rs`) | Comportements transverses du serveur web ; toute nouvelle route d'écriture va dans le routeur protégé par `write_guard` |
   | Superviseur | `logs::supervise` | Tâche externe à relancer après une panne |
@@ -129,6 +130,7 @@ logs.rs (journalctl -f -o json / tail -F, sous-processus relancés) ─► LogAn
                                                                                                           ▼
                                      AlertSink::emit ─► AlertStore (dédoublonnage + broadcast) ─► web.rs (SSE)
                                             └─ si sévérité ≥ llm.min_severity ─► file mpsc<u64> ─► llm.rs
+                                     AlertStore ─broadcast─► notify.rs (décision) ─mpsc─► ntfy, webhook
 
 detect/anomaly.rs (HostAnomaly) ─► anomaly::Baseline ◄─ anomaly::trainer (périodique) ◄─ web.rs (réponses, validation)
                                          └─► anomaly::Storage (data_dir)

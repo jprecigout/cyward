@@ -550,6 +550,22 @@ function setLive(online) {
   live.textContent = online ? "En direct" : "Déconnecté";
 }
 
+// Lien d'une notification (…/#alerte-12) : déplie cette alerte et l'amène à l'écran. Le lien
+// n'est appliqué qu'une fois, pour ne pas ramener la page dessus à chaque reconnexion.
+let linkApplied = false;
+function openFromLink() {
+  const m = location.hash.match(/^#alerte-(\d+)$/);
+  if (linkApplied || !m || !alerts.has(Number(m[1]))) return;
+  linkApplied = true;
+  const id = Number(m[1]);
+  // Les filtres pourraient masquer l'alerte : on les remet à zéro.
+  minSeverity = null;
+  for (const f of ["search", "source", "verdict"]) document.getElementById(f).value = "";
+  open.add(id);
+  renderAll();
+  document.querySelector(`#alerts [data-id="${id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
 // Connexion au flux d'événements. EventSource se reconnecte tout seul après une coupure ;
 // `onopen` recharge alors la liste complète pour rattraper les événements manqués.
 function connect() {
@@ -560,6 +576,7 @@ function connect() {
     alerts.clear();
     for (const a of list) alerts.set(a.id, a);
     renderAll();
+    openFromLink();
   };
   es.onmessage = (m) => { const ev = JSON.parse(m.data); upsert(ev.alert, ev.type === "new"); };
   es.onerror = () => setLive(false);
