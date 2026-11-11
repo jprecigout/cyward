@@ -65,6 +65,24 @@ Le reste du README suit la même règle : détecteurs (section 3), configuration
 - toute modification de la détection se vérifie aussi par le rejeu de `examples/gen_attacks.rs`, qui doit toujours donner 6 alertes. Si un nouveau détecteur est ajouté, ajouter son scénario au générateur et mettre à jour le nombre attendu ici et dans le README ;
 - toute modification du dashboard se vérifie dans un navigateur, après recompilation (la page est embarquée dans le binaire).
 
+## Commits git : Conventional Commits (obligatoire)
+
+Chaque message de commit suit la spécification [Conventional Commits](https://www.conventionalcommits.org/fr/v1.0.0/) :
+
+```
+<type>(<portée optionnelle>): <description courte, en français, à l'impératif ou au nom>
+
+<corps optionnel : le pourquoi, en français>
+
+<pieds optionnels : BREAKING CHANGE: …, Co-Authored-By: …>
+```
+
+- **Types** : `feat` (fonctionnalité), `fix` (correction de bug), `docs` (documentation seule), `test` (tests seuls), `refactor` (ni fonctionnalité ni correction), `perf`, `style`, `build` (Cargo, Dockerfile, compose), `ci`, `chore`. Toujours `docs`, jamais `doc`.
+- **Portée** facultative, en minuscules, nommée d'après le module ou la zone touchés : `feat(detect): …`, `fix(web): …`, `docs(readme): …`, `build(docker): …`.
+- **Rupture de compatibilité** (configuration, API ou format persisté) : `!` après le type ou la portée (`feat(config)!: …`) **et** un pied `BREAKING CHANGE: <ce qui change et comment migrer>`.
+- Un commit = un type. Si une modification mélange une fonctionnalité et une correction sans rapport, en faire deux commits.
+- Première ligne de 72 caractères au plus, sans point final.
+
 ## Skills du projet
 
 Dans `.claude/skills/`, à utiliser plutôt que de réinventer la démarche :
