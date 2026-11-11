@@ -19,7 +19,7 @@ Lire chaque fichier modifié **en entier**, ainsi que les appelants des fonction
 ### Structure et conception (voir CLAUDE.md, « Structure et design patterns »)
 - Chaque module garde une seule responsabilité. Le sens des dépendances correspond au tableau de CLAUDE.md : les producteurs d'alertes (`detect/`, `logs.rs`) n'importent jamais `llm` ni `web`, et inversement. Pour le contrôler :
   ```bash
-  for f in src/detect/*.rs src/logs.rs src/llm.rs src/web.rs; do printf '%-22s ' $f; grep -v '^\s*//' $f | grep -oE '\b(alert|capture|config|stats|llm|web|logs|banner)::' | sort -u | tr '\n' ' '; echo; done
+  for f in src/detect/*.rs src/logs.rs src/logs/*.rs src/llm.rs src/web.rs; do printf '%-22s ' $f; grep -v '^\s*//' $f | grep -oE '\b(alert|capture|config|stats|llm|web|logs|banner)::' | sort -u | tr '\n' ' '; echo; done
   ```
 - La logique de décision reste pure (sans I/O), donc testable ; les I/O restent en bordure.
 - Le changement réutilise les patterns en place (Strategy `Detector`, Builder `Alert`, façade `AlertSink`, Observer `broadcast`, pipeline par canaux, middleware, superviseur) plutôt qu'une mécanique parallèle.

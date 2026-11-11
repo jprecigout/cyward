@@ -1,12 +1,14 @@
-//! Surveillance des journaux système : authentifications SSH, sudo/su, comptes, noyau,
-//! et règles personnalisées.
+//! Surveillance des journaux système : sources de lignes (entrées/sorties), puis analyse par
+//! les règles de [`rules`] (authentifications SSH, sudo/su, comptes, noyau, règles
+//! personnalisées).
 //!
 //! Les lignes sont obtenues en lançant des commandes standard en sous-processus
 //! (`journalctl -f` pour le journal systemd, `tail -F` pour les fichiers), ce qui évite toute
 //! dépendance à libsystemd et gère gratuitement la rotation des fichiers.
 
+mod rules;
+
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
     process::Stdio,
     sync::{Arc, atomic::Ordering},
     time::Duration,
@@ -14,16 +16,15 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use regex::Regex;
-use serde_json::json;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
     sync::mpsc,
 };
 
+use self::rules::LogAnalyzer;
 use crate::{
-    alert::{Alert, AlertKind, AlertSink, AlertSource, Severity},
+    alert::AlertSink,
     config::{AuthConfig, CustomLogRule, LogsConfig},
     stats::Stats,
 };
@@ -144,267 +145,24 @@ fn parse_plain(raw: &str) -> Option<LogLine> {
     Some(LogLine { ts: Utc::now(), ident, message: raw.to_string() })
 }
 
-/// Historique des échecs d'authentification d'une adresse IP.
-#[derive(Default)]
-struct FailureTrack {
-    /// Dates des échecs encore dans la fenêtre.
-    times: VecDeque<DateTime<Utc>>,
-    /// Comptes essayés (pour les preuves de l'alerte).
-    users: HashSet<String>,
-}
-
-/// Applique les règles aux lignes de logs. Garde un état par IP pour les corrélations
-/// (échecs répétés, succès après échecs).
-pub struct LogAnalyzer {
-    cfg: AuthConfig,
-    // Règles intégrées, compilées une seule fois.
-    failed: Regex,
-    invalid: Regex,
-    accepted: Regex,
-    sudo_fail: Regex,
-    sudo_denied: Regex,
-    su_fail: Regex,
-    useradd: Regex,
-    priv_group: Regex,
-    syn_flood: Regex,
-    /// Règles de la configuration, avec leur regex compilée.
-    custom: Vec<(CustomLogRule, Regex)>,
-    /// Échecs d'authentification par adresse IP.
-    failures: HashMap<String, FailureTrack>,
-}
-
-impl LogAnalyzer {
-    pub fn new(cfg: AuthConfig, custom: &[CustomLogRule]) -> Result<Self> {
-        // Capture une adresse IPv4 ou IPv6 (volontairement permissive).
-        const IP: &str = r"(?P<ip>[0-9a-fA-F:.]+)";
-        Ok(Self {
-            cfg,
-            // Les exemples de lignes visées sont dans les tests en bas du fichier et dans le README.
-            failed: Regex::new(&format!(r"Failed (?:password|publickey|keyboard-interactive/pam) for (?:invalid user )?(?P<user>\S+) from {IP}"))?,
-            invalid: Regex::new(&format!(r"Invalid user (?P<user>\S*) from {IP}"))?,
-            accepted: Regex::new(&format!(r"Accepted (?P<method>\S+) for (?P<user>\S+) from {IP}"))?,
-            sudo_fail: Regex::new(r"(?P<user>\S+) : (?P<n>\d+) incorrect password attempts?")?,
-            sudo_denied: Regex::new(r"(?P<user>\S+) : (?:user NOT in sudoers|command not allowed)")?,
-            su_fail: Regex::new(r"pam_unix\(su(?:-l)?:auth\): authentication failure.*?ruser=(?P<user>\S*)")?,
-            useradd: Regex::new(r"new user: name=(?P<user>[^,\s]+)")?,
-            priv_group: Regex::new(r"add '(?P<user>[^']+)' to (?:shadow )?group '(?P<group>sudo|wheel|admin|root|docker|lxd)'")?,
-            syn_flood: Regex::new(r"Possible SYN flooding on port (?P<port>\d+)")?,
-            custom: custom
-                .iter()
-                .map(|r| Regex::new(&r.pattern).map(|re| (r.clone(), re)).with_context(|| format!("règle {}", r.name)))
-                .collect::<Result<_>>()?,
-            failures: HashMap::new(),
-        })
-    }
-
-    /// Analyse une ligne et renvoie les alertes qu'elle déclenche (souvent aucune).
-    /// Une même ligne peut déclencher plusieurs règles.
-    pub fn analyze(&mut self, line: &LogLine) -> Vec<Alert> {
-        let mut out = Vec::new();
-        let msg = line.message.as_str();
-        let ts = line.ts;
-        // Preuves communes à la plupart des règles : la ligne brute et son programme.
-        let evidence = || json!({ "log": msg, "program": line.ident });
-
-        // sshd écrit « Invalid user » puis « Failed password » pour la même tentative :
-        // seul le second compte comme un échec, le premier sert à connaître les comptes essayés.
-        if let Some(c) = self.invalid.captures(msg) {
-            self.failures.entry(c["ip"].to_string()).or_default().users.insert(c["user"].to_string());
-        }
-
-        // --- Échecs SSH : fenêtre glissante par IP ---
-        if let Some(c) = self.failed.captures(msg) {
-            let ip = c["ip"].to_string();
-            let window = chrono::Duration::seconds(self.cfg.window_secs);
-            let track = self.failures.entry(ip.clone()).or_default();
-            track.times.push_back(ts);
-            track.users.insert(c["user"].to_string());
-            // Retire les échecs sortis de la fenêtre.
-            while track.times.front().is_some_and(|&t| ts - t > window) {
-                track.times.pop_front();
-            }
-            // `==` : une seule alerte quand le seuil est franchi, pas une par échec supplémentaire.
-            if track.times.len() == self.cfg.failures_threshold {
-                let users: Vec<_> = track.users.iter().take(20).cloned().collect();
-                out.push(
-                    Alert::new(AlertKind::AuthBruteForce, Severity::High, AlertSource::Logs, ts, format!("Force brute SSH depuis {ip}"))
-                        .description(format!(
-                            "{} échecs d'authentification en moins de {} s, {} compte(s) essayé(s).",
-                            track.times.len(),
-                            self.cfg.window_secs,
-                            track.users.len()
-                        ))
-                        .src(&ip)
-                        .evidence(json!({ "failures": track.times.len(), "users": users, "last_log": msg })),
-                );
-            }
-        // --- Succès SSH : suspect s'il suit de près des échecs de la même IP ---
-        } else if let Some(c) = self.accepted.captures(msg) {
-            let ip = &c["ip"];
-            // Fenêtre plus large (×4) : un attaquant peut se connecter un peu après avoir trouvé le mot de passe.
-            let window = chrono::Duration::seconds(self.cfg.window_secs * 4);
-            if let Some(track) = self.failures.get(ip) {
-                let recent = track.times.iter().filter(|&&t| ts - t <= window).count();
-                // Il suffit de la moitié du seuil d'échecs (arrondie au-dessus) pour rendre un succès suspect.
-                if recent >= self.cfg.failures_threshold.div_ceil(2) {
-                    out.push(
-                        Alert::new(AlertKind::AuthCompromise, Severity::Critical, AlertSource::Logs, ts, format!("Connexion réussie de {} après {recent} échecs", &c["user"]))
-                            .description(format!(
-                                "{ip} a ouvert une session ({}) sur le compte {} juste après une série d'échecs : le mot de passe a peut-être été trouvé.",
-                                &c["method"],
-                                &c["user"]
-                            ))
-                            .src(ip)
-                            .dst(&c["user"])
-                            .evidence(json!({ "previous_failures": recent, "log": msg })),
-                    );
-                }
-            }
-        }
-
-        // --- sudo : refus (grave) ou mauvais mot de passe (moins grave) ---
-        if let Some(c) = self.sudo_denied.captures(msg) {
-            out.push(
-                Alert::new(AlertKind::PrivilegeEscalation, Severity::High, AlertSource::Logs, ts, format!("Tentative sudo non autorisée par {}", &c["user"]))
-                    .description("Un utilisateur sans droits sudo a tenté d'exécuter une commande privilégiée.")
-                    .src(&c["user"])
-                    .evidence(evidence()),
-            );
-        } else if let Some(c) = self.sudo_fail.captures(msg) {
-            out.push(
-                Alert::new(AlertKind::PrivilegeEscalation, Severity::Medium, AlertSource::Logs, ts, format!("Échecs de mot de passe sudo pour {}", &c["user"]))
-                    .description(format!("{} tentative(s) de mot de passe incorrect(es) pour sudo.", &c["n"]))
-                    .src(&c["user"])
-                    .evidence(evidence()),
-            );
-        }
-
-        // --- su : échec d'authentification ---
-        if let Some(c) = self.su_fail.captures(msg) {
-            let user = if c["user"].is_empty() { "inconnu" } else { &c["user"] };
-            out.push(
-                Alert::new(AlertKind::PrivilegeEscalation, Severity::Low, AlertSource::Logs, ts, format!("Échec de su par {user}"))
-                    .src(user)
-                    .evidence(evidence()),
-            );
-        }
-
-        // --- Création de compte (useradd) : moyen classique de persistance ---
-        if let Some(c) = self.useradd.captures(msg) {
-            out.push(
-                Alert::new(AlertKind::AccountChange, Severity::Medium, AlertSource::Logs, ts, format!("Nouveau compte créé : {}", &c["user"]))
-                    .description("Création d'un compte local. À vérifier si elle n'était pas prévue (persistance d'un attaquant).")
-                    .dst(&c["user"])
-                    .evidence(evidence()),
-            );
-        }
-
-        // --- Ajout à un groupe donnant des droits d'administration (usermod/gpasswd) ---
-        if let Some(c) = self.priv_group.captures(msg) {
-            out.push(
-                Alert::new(AlertKind::PrivilegeEscalation, Severity::High, AlertSource::Logs, ts, format!("{} ajouté au groupe privilégié {}", &c["user"], &c["group"]))
-                    .description("Un compte a reçu des droits d'administration.")
-                    .dst(&c["user"])
-                    .evidence(evidence()),
-            );
-        }
-
-        // --- Le noyau signale lui-même une inondation SYN ---
-        if let Some(c) = self.syn_flood.captures(msg) {
-            out.push(
-                Alert::new(AlertKind::SynFlood, Severity::Medium, AlertSource::Logs, ts, format!("Le noyau signale une inondation SYN sur le port {}", &c["port"]))
-                    .dst(format!("port {}", &c["port"]))
-                    .evidence(evidence()),
-            );
-        }
-
-        // --- Règles personnalisées ---
-        for (rule, re) in &self.custom {
-            if let Some(c) = re.captures(msg) {
-                // Empreinte par règle et par IP : une même IP répétant le motif est fusionnée.
-                let mut a = Alert::new(AlertKind::CustomRule, rule.severity, AlertSource::Logs, ts, rule.title.clone())
-                    .description(format!("Règle personnalisée « {} ».", rule.name))
-                    .fingerprint(format!("custom|{}|{}", rule.name, c.name("ip").map(|m| m.as_str()).unwrap_or("")))
-                    .evidence(evidence());
-                if let Some(ip) = c.name("ip") {
-                    a = a.src(ip.as_str());
-                }
-                out.push(a);
-            }
-        }
-
-        // Purge occasionnelle des IP inactives, pour qu'une attaque depuis de nombreuses
-        // adresses ne fasse pas croître la mémoire indéfiniment.
-        if self.failures.len() > 50_000 {
-            let window = chrono::Duration::seconds(self.cfg.window_secs * 4);
-            self.failures.retain(|_, t| t.times.back().is_some_and(|&last| ts - last <= window));
-        }
-        out
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn line(ts: DateTime<Utc>, msg: &str) -> LogLine {
-        LogLine { ts, ident: "sshd".into(), message: msg.into() }
-    }
-
-    // 8 échecs → une alerte de force brute, puis le succès de la même IP → alerte critique.
-    #[test]
-    fn ssh_bruteforce_then_success() {
-        let mut a = LogAnalyzer::new(AuthConfig::default(), &[]).unwrap();
-        let t0 = Utc::now();
-        let mut alerts = Vec::new();
-        for i in 0..8 {
-            let msg = format!("Failed password for invalid user admin{i} from 203.0.113.4 port 5{i}222 ssh2");
-            alerts.extend(a.analyze(&line(t0 + chrono::Duration::seconds(i), &msg)));
-        }
-        assert_eq!(alerts.len(), 1);
-        assert_eq!(alerts[0].kind, AlertKind::AuthBruteForce);
-
-        let ok = a.analyze(&line(t0 + chrono::Duration::seconds(20), "Accepted password for root from 203.0.113.4 port 50000 ssh2"));
-        assert_eq!(ok.len(), 1);
-        assert_eq!(ok[0].kind, AlertKind::AuthCompromise);
-        assert_eq!(ok[0].severity, Severity::Critical);
-    }
-
-    // Une connexion normale sans échec préalable ne lève rien.
-    #[test]
-    fn normal_login_is_quiet() {
-        let mut a = LogAnalyzer::new(AuthConfig::default(), &[]).unwrap();
-        assert!(a.analyze(&line(Utc::now(), "Accepted publickey for jerome from 192.168.1.2 port 4242 ssh2: ED25519 SHA256:abc")).is_empty());
-    }
-
-    #[test]
-    fn sudo_and_accounts() {
-        let mut a = LogAnalyzer::new(AuthConfig::default(), &[]).unwrap();
-        let t = Utc::now();
-        assert_eq!(a.analyze(&line(t, "bob : user NOT in sudoers ; TTY=pts/1 ; PWD=/home/bob ; USER=root ; COMMAND=/bin/bash"))[0].severity, Severity::High);
-        assert_eq!(a.analyze(&line(t, "new user: name=backdoor, UID=1001, GID=1001, home=/home/backdoor, shell=/bin/bash, from=/dev/pts/0"))[0].kind, AlertKind::AccountChange);
-        assert_eq!(a.analyze(&line(t, "add 'backdoor' to group 'sudo'"))[0].kind, AlertKind::PrivilegeEscalation);
-    }
-
-    // Le groupe nommé `ip` d'une règle personnalisée devient la source de l'alerte.
-    #[test]
-    fn custom_rule_extracts_ip() {
-        let rule = CustomLogRule {
-            name: "nginx-wp".into(),
-            pattern: r#"(?P<ip>\d+\.\d+\.\d+\.\d+) .*"(?:GET|POST) /wp-login\.php"#.into(),
-            severity: Severity::Low,
-            title: "Sonde WordPress".into(),
-        };
-        let mut a = LogAnalyzer::new(AuthConfig::default(), &[rule]).unwrap();
-        let out = a.analyze(&line(Utc::now(), r#"198.51.100.3 - - [11/Nov/2026:10:00:00 +0000] "POST /wp-login.php HTTP/1.1" 404"#));
-        assert_eq!(out[0].src.as_deref(), Some("198.51.100.3"));
-    }
-
+    // Une entrée journald est décodée : message, programme et horodatage en microsecondes.
     #[test]
     fn journal_json_is_parsed() {
         let l = parse_journal_json(r#"{"MESSAGE":"hello","SYSLOG_IDENTIFIER":"sshd","__REALTIME_TIMESTAMP":"1762855200000000"}"#).unwrap();
         assert_eq!(l.ident, "sshd");
         assert_eq!(l.message, "hello");
         assert_eq!(l.ts.timestamp(), 1_762_855_200);
+    }
+
+    // Une ligne syslog en texte garde son message entier et en extrait le programme.
+    #[test]
+    fn plain_line_keeps_message_and_program() {
+        let l = parse_plain("Nov 11 10:00:00 srv sshd[123]: Failed password for root from 1.2.3.4 port 22 ssh2").unwrap();
+        assert_eq!(l.ident, "sshd");
+        assert!(l.message.ends_with("ssh2"));
     }
 }

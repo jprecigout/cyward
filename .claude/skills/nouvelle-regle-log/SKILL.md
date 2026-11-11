@@ -5,7 +5,7 @@ description: Ajoute à Cyward une règle de détection sur les journaux système
 
 # Ajouter une règle de log
 
-Les lignes de logs arrivent dans `LogAnalyzer::analyze` (`src/logs.rs`) sous forme de `LogLine` (horodatage, programme, message), depuis `journalctl -f -o json` ou `tail -F`.
+Les lignes de logs sont lues par `src/logs.rs` (`journalctl -f -o json` ou `tail -F`), décodées en `LogLine` (horodatage, programme, message), puis passées à chaque règle de `src/logs/rules.rs`. Une règle implémente le trait `LogRule` (pattern Strategy, comme les détecteurs réseau) ; `LogAnalyzer::new` les enregistre.
 
 ## 1. Choisir : règle de configuration ou règle intégrée ?
 
@@ -39,28 +39,29 @@ Ces lignes (anonymisées si besoin) servent ensuite de données de test.
 
 ## 3. Implémenter une règle intégrée
 
-Dans `src/logs.rs` :
+Dans `src/logs/rules.rs`, sans modifier les règles existantes :
 
-1. **Champ** dans `LogAnalyzer` : `nom: Regex`, avec un `///` qui dit ce que la règle repère.
-2. **Compilation** dans `LogAnalyzer::new`, à côté des autres. Utiliser la constante `IP` pour capturer une adresse, et des groupes nommés (`(?P<user>…)`). Les regex Rust s'exécutent en temps linéaire : une ligne piégée ne peut pas bloquer l'analyse.
-3. **Bloc** dans `analyze`, précédé d'un commentaire `// --- <événement> ---` comme les autres :
+1. **Règle à une seule regex, sans mémoire** : une fonction qui construit l'alerte, enregistrée comme `Pattern` dans la liste de `LogAnalyzer::new`, précédée d'un commentaire qui dit ce qu'elle repère :
    ```rust
-   // --- <Événement> : <pourquoi c'est suspect> ---
-   if let Some(c) = self.nom.captures(msg) {
-       out.push(
-           Alert::new(AlertKind::Xxx, Severity::Medium, AlertSource::Logs, ts, format!("<Titre> {}", &c["user"]))
-               .description("<Explication pour l'analyste.>")
-               .src(&c["user"])
-               .evidence(evidence()),
-       );
+   // <Événement> : <pourquoi c'est suspect>.
+   Box::new(Pattern::new(r"<regex avec groupes nommés>", nom_de_la_regle)?),
+
+   fn nom_de_la_regle(c: &Captures, line: &LogLine) -> Alert {
+       Alert::new(AlertKind::Xxx, Severity::Medium, AlertSource::Logs, line.ts, format!("<Titre> {}", &c["user"]))
+           .description("<Explication pour l'analyste.>")
+           .src(&c["user"])
+           .evidence(evidence(line))
    }
    ```
-   - `evidence()` joint la ligne brute et le programme. Elle peut contenir du texte choisi par un attaquant ; le dashboard l'affiche comme du texte, ne jamais changer cela.
-   - Une règle avec mémoire (compteurs par IP, par compte) garde son état dans une `HashMap` du `LogAnalyzer`, sur le modèle de `failures`, **avec une purge** (voir la fin de `analyze`).
-   - Pour un nouveau type d'alerte, ajouter une variante à `AlertKind` (`src/alert.rs`) ; sinon réutiliser `PrivilegeEscalation`, `AccountChange`, etc.
-4. **Tests** dans le module `tests` de `logs.rs`, avec les vraies lignes récupérées à l'étape 2 :
+2. **Règle avec mémoire ou à plusieurs regex** : une struct qui implémente `LogRule`, sur le modèle de `SshAuth` (état par IP) ou de `Sudo` (deux regex exclusives), puis `Box::new(MaRegle::new(...)?)` dans `LogAnalyzer::new`. L'état garde **une purge** (voir `MAX_TRACKED_IPS` dans `SshAuth::check`).
+3. Dans les deux cas :
+   - utiliser la constante `IP` pour capturer une adresse, et des groupes nommés (`(?P<user>…)`). Les regex Rust s'exécutent en temps linéaire : une ligne piégée ne peut pas bloquer l'analyse ;
+   - `evidence(line)` joint la ligne brute et le programme. Elle peut contenir du texte choisi par un attaquant ; le dashboard l'affiche comme du texte, ne jamais changer cela ;
+   - pour un nouveau type d'alerte, ajouter une variante à `AlertKind` (`src/alert.rs`) ; sinon réutiliser `PrivilegeEscalation`, `AccountChange`, etc. ;
+   - la position dans la liste de `LogAnalyzer::new` fixe l'ordre des alertes produites par une même ligne.
+4. **Tests** dans le module `tests` de `logs/rules.rs`, avec les vraies lignes récupérées à l'étape 2 :
    - un cas positif (la ligne déclenche l'alerte attendue, avec la bonne sévérité) ;
-   - un cas négatif (une ligne voisine mais légitime ne déclenche rien) ;
+   - un cas négatif (une ligne voisine mais légitime ne déclenche rien ; l'ajouter à `ordinary_lines_are_quiet`) ;
    - pour une règle avec mémoire : sous le seuil → rien, au seuil → une alerte, au-delà → pas d'autre alerte.
 5. **Documentation** : une ligne dans le tableau de la section 3.7 du README (règle, exemple de ligne, alerte).
 6. **Vérifier** avec le skill `verifier` : `.claude/skills/verifier/check.sh`.

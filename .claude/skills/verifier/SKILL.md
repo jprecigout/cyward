@@ -28,7 +28,7 @@ Ajoute `--docker` pour construire aussi l'image et y rejouer le pcap :
 ## Quand l'utiliser
 
 - Avant d'annoncer qu'une modification est terminée : c'est la preuve que les règles « commenté et testé » de CLAUDE.md sont respectées.
-- Après tout changement dans `src/detect/`, `src/logs.rs` ou `examples/gen_attacks.rs`.
+- Après tout changement dans `src/detect/`, `src/logs.rs`, `src/logs/` ou `examples/gen_attacks.rs`.
 - `--docker` seulement si le `Dockerfile`, `compose.yaml`, `docker/` ou les dépendances (`Cargo.toml`) ont changé : la construction prend plusieurs minutes.
 
 ## Lire un échec

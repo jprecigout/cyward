@@ -128,7 +128,9 @@ cyward/
     │   ├── baseline.rs        # cycle de vie et garde-fous de validation        ③
     │   ├── storage.rs         # persistance sur disque                          ⑨
     │   └── trainer.rs         # apprentissages périodiques                      ⑤
-    ├── logs.rs                # sources de logs et règles d'analyse            ⑤ ⑦
+    ├── logs.rs                # sources de logs (journalctl, tail -F)          ⑤ ⑦
+    ├── logs/
+    │   └── rules.rs           # trait LogRule et règles d'analyse              ①
     ├── llm.rs                 # client du modèle, prompt, décodage du verdict  ⑤
     └── web.rs                 # serveur HTTP, API JSON, flux SSE               ④ ⑥
 ```
@@ -161,7 +163,9 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 
 **`logs.rs`** — producteur/consommateur ⑤, superviseur ⑦
 - Lance `journalctl -f -o json` et/ou `tail -F` sur les fichiers configurés, et relance la commande si elle s'arrête.
-- Le `LogAnalyzer` applique des expressions régulières et garde, par IP, l'historique des échecs d'authentification.
+- Les lignes, décodées en `LogLine`, passent au `LogAnalyzer` (`logs/rules.rs`, Strategy ①).
+- Chaque règle implémente `trait LogRule { fn check(&mut self, line: &LogLine, out: &mut Vec<Alert>); }` et garde son propre état. Par exemple, `SshAuth` mémorise par IP l'historique des échecs d'authentification.
+- Une règle à une seule regex et sans état est un `Pattern` : la regex, plus la fonction qui construit l'alerte.
 
 **`alert.rs`** — Builder ② (`Alert`), Façade ③ (`AlertSink`), Observer ④ (`AlertStore`)
 - **`AlertSink`** est le point d'entrée unique des détecteurs. Il enregistre l'alerte et l'envoie en triage IA si sa sévérité le justifie.
@@ -232,7 +236,7 @@ Cyward est construit sur **9 design patterns**. Le schéma montre où chacun int
 
 | # | Pattern | Où | Problème résolu dans Cyward |
 |---|---|---|---|
-| ① | **Strategy** | `trait Detector`, `Engine` (`src/detect/`) | Ajouter une détection (y compris l'apprentissage du comportement normal) sans toucher au moteur |
+| ① | **Strategy** | `trait Detector`, `Engine` (`src/detect/`) ; `trait LogRule`, `LogAnalyzer` (`src/logs/rules.rs`) | Ajouter une détection réseau (y compris l'apprentissage du comportement normal) ou une règle de log sans toucher au code existant |
 | ② | **Builder** | `Alert::new(...).src(...)...` (`src/alert.rs`) | Construire lisiblement une alerte aux nombreux champs optionnels |
 | ③ | **Façade** | `AlertSink::emit` (`src/alert.rs`) ; `Baseline` (`src/anomaly/baseline.rs`) | Un point d'entrée unique qui masque un sous-système : stockage et triage des alertes ; cycle de vie du comportement normal |
 | ④ | **Observer** | `AlertStore` + canal `broadcast` → SSE (`src/alert.rs`, `src/web.rs`) | Prévenir un nombre inconnu de navigateurs à chaque changement |
@@ -271,6 +275,10 @@ for d in &mut self.detectors {
 ```
 
 **Utilisation** : un nouveau détecteur est une nouvelle structure qui implémente `Detector`, ajoutée à la liste de `Engine::new`. Ni le moteur ni les autres détecteurs ne sont modifiés (principe ouvert/fermé). Le skill `/nouveau-detecteur` décrit la démarche complète.
+
+**Même pattern pour les logs** : le trait `LogRule` (`src/logs/rules.rs`) joue le rôle de `Detector`, et `LogAnalyzer` celui d'`Engine`.
+- Les stratégies concrètes sont `SshAuth` (échecs et succès SSH, avec état par IP), `Sudo`, une règle `Custom` par règle de la configuration, et des `Pattern` pour les règles à une seule regex (su, création de compte, groupe privilégié, noyau).
+- Une nouvelle règle s'ajoute à la liste de `LogAnalyzer::new`, sans toucher aux autres. Le skill `/nouvelle-regle-log` décrit la démarche.
 
 #### ② Builder : la construction des alertes
 
@@ -532,7 +540,7 @@ Chaque seuil cité est modifiable dans la configuration (section 7).
 
 **MITRE :** T1071.004 (DNS), T1568.002 (Domain Generation Algorithms), T1048 (Exfiltration Over Alternative Protocol).
 
-### 3.7 Règles sur les journaux système (`LogAnalyzer`)
+### 3.7 Règles sur les journaux système (`LogAnalyzer`, `src/logs/rules.rs`)
 
 | Règle | Exemple de ligne | Alerte |
 |---|---|---|
@@ -1114,10 +1122,10 @@ Avec `AmbientCapabilities`, le `setcap` sur le binaire n'est pas nécessaire.
 cargo test
 ```
 
-79 tests couvrent :
+83 tests couvrent :
 - le parsing des paquets et du DNS ;
 - chaque détecteur, cas positifs et négatifs (un scan lent ou un trafic irrégulier ne doivent pas déclencher), et le plafond mémoire des détecteurs exposés aux adresses usurpées ;
-- les règles de logs ;
+- les règles de logs, cas positifs et négatifs (lignes ordinaires, regex personnalisée invalide), et le décodage des lignes journald et texte ;
 - la fusion des alertes ;
 - l'extraction du JSON renvoyé par le modèle ;
 - l'apprentissage du comportement normal : l'Isolation Forest (point isolé, reproductibilité, sérialisation), les caractéristiques, le diff (bruit, nouveau comportement, dérive), le cycle de vie complet avec ses garde-fous (validation obligatoire, réponses, exceptions, refus, fenêtres exclues, retour arrière, calcul en cours qui bloque les décisions concurrentes), la persistance (sauvegarde incrémentale, compaction, reprise de l'ancien format, ligne coupée) ;

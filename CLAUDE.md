@@ -19,7 +19,7 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
   |---|---|
   | `detect/` | `alert`, `anomaly`, `capture` (`PacketMeta`), `config` |
   | `anomaly/` | `alert`, `config` |
-  | `logs.rs` | `alert`, `config`, `stats` |
+  | `logs.rs` (et `logs/rules.rs`) | `alert`, `config`, `stats` |
   | `llm.rs` | `alert`, `config`, `stats` |
   | `web.rs` | `alert`, `anomaly`, `stats` |
 
@@ -29,7 +29,7 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
 
   | Pattern | Où | À réutiliser pour |
   |---|---|---|
-  | Strategy (trait + objets `Box<dyn …>`) | `trait Detector`, `Engine` | Tout nouveau détecteur ou analyseur interchangeable |
+  | Strategy (trait + objets `Box<dyn …>`) | `trait Detector`, `Engine` ; `trait LogRule`, `LogAnalyzer` (`logs/rules.rs`) | Tout nouveau détecteur, règle de log ou analyseur interchangeable |
   | Builder | `Alert::new(...).src(...).dst(...).evidence(...)` | Construire des objets à nombreux champs optionnels |
   | Façade / point d'entrée unique | `AlertSink::emit` ; `Baseline` (`anomaly/baseline.rs`) | Tout ce qui produit des alertes : ne jamais écrire directement dans le store ou la file LLM. Tout ce qui touche au comportement normal passe par `Baseline`, qui applique les garde-fous de validation |
   | Observer (publication/abonnement) | `AlertStore` + `broadcast` → clients SSE | Diffuser des événements à plusieurs consommateurs |
@@ -178,7 +178,7 @@ Points qui demandent de lire plusieurs fichiers pour être compris :
 4. Tester avec `detect::testutil::{syn, dns}` (constructeurs de `PacketMeta`), y compris un cas négatif. Ajouter éventuellement le scénario à `examples/gen_attacks.rs`.
 5. Mettre à jour les tableaux du README (détecteurs, configuration, types d'alerte).
 
-Les règles de logs vivent dans `LogAnalyzer` (`logs.rs`). Particularité sshd : une même tentative produit `Invalid user …` **et** `Failed password for invalid user …`. Seule la seconde ligne compte comme un échec ; la première sert uniquement à collecter les noms de compte.
+Les règles de logs vivent dans `logs/rules.rs` : une struct par règle qui implémente `LogRule` (ou un `Pattern` pour une regex unique sans état), enregistrée dans `LogAnalyzer::new` ; `logs.rs` ne contient que les sources (sous-processus) et le décodage des lignes. Particularité sshd : une même tentative produit `Invalid user …` **et** `Failed password for invalid user …`. Seule la seconde ligne compte comme un échec ; la première sert uniquement à collecter les noms de compte.
 
 ## Dashboard
 
