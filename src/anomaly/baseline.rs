@@ -9,6 +9,11 @@
 //!
 //! Les méthodes sont synchrones et sans réseau : le détecteur, l'entraîneur et l'API web les
 //! appellent, et les tests les exercent directement.
+//!
+//! Le verrou de l'état n'est jamais tenu pendant un calcul long ni pendant une écriture sur
+//! disque : le moteur de détection le prend à chaque fin de fenêtre, et l'attendre ferait
+//! perdre des paquets. L'apprentissage travaille sur une copie des échantillons, et la
+//! sauvegarde n'ajoute au journal que ce qui a changé depuis la précédente.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -34,6 +39,9 @@ const MAX_SEEN_PER_HOST: usize = 2000;
 const MAX_RECENT_DECISIONS: usize = 100;
 /// Écart (en dispersions robustes) à partir duquel une caractéristique explique une anomalie.
 const EXPLAIN_Z: f64 = 3.0;
+/// Lignes de journal tolérées en plus des échantillons conservés avant de le réécrire
+/// (compaction). La marge évite de réécrire sans cesse un petit état.
+const COMPACT_SLACK: usize = 10_000;
 
 /// Ce que le détecteur doit faire d'une fenêtre qui vient de se terminer.
 #[derive(Debug, Clone, PartialEq)]
@@ -140,10 +148,46 @@ impl From<Seen> for VecDeque<String> {
     }
 }
 
+/// Modification des échantillons, telle qu'écrite dans le journal `samples.jsonl` : rejouer
+/// le journal dans l'ordre reconstruit les échantillons.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SampleEvent {
+    /// Nouvelle fenêtre enregistrée.
+    Add(Sample),
+    /// Changement de statut d'une fenêtre (réponse de l'utilisateur, refus d'un diff).
+    Status { host: String, start: f64, status: SampleStatus },
+}
+
+/// Ensemble de fenêtres désignées par (machine, début), sans copier les noms de machine.
+/// Le début est comparé par ses bits : c'est la même valeur, relue telle quelle.
+struct Windows<'a>(HashMap<&'a str, HashSet<u64>>);
+
+impl<'a> Windows<'a> {
+    fn new(items: impl IntoIterator<Item = (&'a str, f64)>) -> Self {
+        let mut m: HashMap<&str, HashSet<u64>> = HashMap::new();
+        for (host, start) in items {
+            m.entry(host).or_default().insert(start.to_bits());
+        }
+        Self(m)
+    }
+
+    fn contains(&self, s: &Sample) -> bool {
+        self.0.get(s.host.as_str()).is_some_and(|t| t.contains(&s.start.to_bits()))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// État persistant (et, pour les champs `skip`, état de travail en mémoire).
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct State {
+    /// Échantillons, persistés à part dans le journal `samples.jsonl`. Encore lus depuis
+    /// `state.json` pour reprendre l'ancien format, où ils y étaient tous réécrits.
+    #[serde(skip_serializing)]
     samples: VecDeque<Sample>,
     seen: HashMap<String, Seen>,
     exceptions: Vec<Exception>,
@@ -160,12 +204,53 @@ struct State {
     /// Modèles validés gardés en mémoire (retour arrière sans disque).
     #[serde(skip)]
     versions: BTreeMap<u32, Model>,
+    /// Un apprentissage calcule hors verrou : pendant ce temps, ni second apprentissage, ni
+    /// validation, ni retour arrière (son résultat serait aussitôt périmé).
+    #[serde(skip)]
+    training: bool,
+    /// Modifications des échantillons pas encore écrites dans le journal.
+    #[serde(skip)]
+    pending: Vec<SampleEvent>,
+    /// Lignes déjà présentes dans le journal (pour décider de la compaction).
+    #[serde(skip)]
+    journal_lines: usize,
+    /// Le journal doit être entièrement réécrit à la prochaine sauvegarde (ancien format, ou
+    /// écriture précédente en échec).
+    #[serde(skip)]
+    compact: bool,
+    /// Le reste de l'état (exceptions, journal récent, destinations vues, version active…) a
+    /// changé depuis la dernière écriture de `state.json`.
+    #[serde(skip)]
+    meta_dirty: bool,
 }
 
 pub struct Baseline {
     cfg: AnomalyConfig,
     storage: Option<Storage>,
     state: Mutex<State>,
+    /// Une sauvegarde à la fois : deux sauvegardes entrelacées pourraient écrire deux fois la
+    /// même fenêtre dans le journal. Pris avant `state`, jamais l'inverse.
+    saving: Mutex<()>,
+}
+
+/// Remet `training` à faux à la fin d'un apprentissage, même s'il échoue ou panique.
+/// Doit être détruit après la libération de tout verrou sur l'état (sinon interblocage).
+struct TrainingFlag<'a>(&'a Mutex<State>);
+
+impl Drop for TrainingFlag<'_> {
+    fn drop(&mut self) {
+        self.0.lock().training = false;
+    }
+}
+
+/// Ce que la sauvegarde doit écrire, préparé sous verrou puis écrit hors verrou.
+struct SaveWork {
+    /// Nouveau contenu de `state.json`, s'il a changé.
+    meta: Option<Vec<u8>>,
+    /// Lignes du journal des échantillons.
+    events: Vec<SampleEvent>,
+    /// Vrai : `events` remplace tout le journal (compaction). Faux : il s'y ajoute.
+    rewrite: bool,
 }
 
 impl Baseline {
@@ -178,6 +263,20 @@ impl Baseline {
         }
         let storage = Storage::open(std::path::Path::new(&cfg.data_dir))?;
         let mut state: State = storage.load_state()?.unwrap_or_default();
+        match storage.load_samples::<SampleEvent>()? {
+            Some(events) => {
+                state.journal_lines = events.len();
+                state.samples = replay(events);
+            }
+            // Ancien format : les échantillons étaient dans state.json. La première sauvegarde
+            // les écrit dans le journal et réécrit state.json sans eux.
+            None if !state.samples.is_empty() => {
+                state.compact = true;
+                state.meta_dirty = true;
+            }
+            None => {}
+        }
+        enforce_retention(&mut state.samples, &cfg);
         if let Some(v) = state.active_version {
             let m = storage.load_model(v)?;
             state.versions.insert(v, m.clone());
@@ -188,11 +287,11 @@ impl Baseline {
             state.samples.len(),
             state.active_version.map(|v| format!("v{v}")).unwrap_or_else(|| "aucun".into())
         );
-        Ok(Self { cfg, storage: Some(storage), state: Mutex::new(state) })
+        Ok(Self { cfg, storage: Some(storage), state: Mutex::new(state), saving: Mutex::new(()) })
     }
 
     pub fn in_memory(cfg: AnomalyConfig) -> Self {
-        Self { cfg, storage: None, state: Mutex::new(State::default()) }
+        Self { cfg, storage: None, state: Mutex::new(State::default()), saving: Mutex::new(()) }
     }
 
     pub fn config(&self) -> &AnomalyConfig {
@@ -220,6 +319,10 @@ impl Baseline {
                 }
             }
         }
+        // Sur un réseau stable, rien de nouveau : state.json n'a pas à être réécrit.
+        if new > 0 {
+            st.meta_dirty = true;
+        }
         new
     }
 
@@ -245,12 +348,10 @@ impl Baseline {
                 }
             }
         };
-        st.samples.push_back(Sample { host: host.to_string(), start, end, features, status });
-        // Rétention : par ancienneté (temps des paquets), puis par nombre.
-        let oldest = end - self.cfg.retention_days * 86_400.0;
-        while st.samples.front().is_some_and(|s| s.end < oldest) || st.samples.len() > self.cfg.max_samples {
-            st.samples.pop_front();
-        }
+        let sample = Sample { host: host.to_string(), start, end, features, status };
+        st.pending.push(SampleEvent::Add(sample.clone()));
+        st.samples.push_back(sample);
+        enforce_retention(&mut st.samples, &self.cfg);
         verdict
     }
 
@@ -258,7 +359,9 @@ impl Baseline {
     /// [`from`, `to`]. Renvoie le nombre de fenêtres mises à jour.
     #[allow(clippy::too_many_arguments)]
     pub fn feedback(&self, host: &str, from: f64, to: f64, verdict: FeedbackVerdict, scope: FeedbackScope, reason: &str, feature_ids: &[usize], now: DateTime<Utc>) -> Result<usize> {
-        let mut st = self.state.lock();
+        let mut guard = self.state.lock();
+        // Accès direct aux champs : `samples` et `pending` sont modifiés dans la même boucle.
+        let st = &mut *guard;
         let status = match verdict {
             FeedbackVerdict::Normal => SampleStatus::ConfirmedNormal,
             FeedbackVerdict::Suspect => SampleStatus::Suspicious,
@@ -266,6 +369,7 @@ impl Baseline {
         let mut n = 0;
         for s in st.samples.iter_mut().filter(|s| s.host == host && s.status == SampleStatus::Flagged && s.start >= from - 0.5 && s.start <= to + 0.5) {
             s.status = status;
+            st.pending.push(SampleEvent::Status { host: s.host.clone(), start: s.start, status });
             n += 1;
         }
         if n == 0 {
@@ -285,15 +389,15 @@ impl Baseline {
             if verdict == FeedbackVerdict::Normal { "normales" } else { "suspectes" },
             if verdict == FeedbackVerdict::Normal && scope == FeedbackScope::Always { ", exception créée" } else { "" }
         );
-        self.log(&mut st, now, "feedback", Some(host), detail, Some(reason));
+        self.log(st, now, "feedback", Some(host), detail, Some(reason));
         Ok(n)
     }
 
     /// Vrai si un apprentissage automatique doit être lancé maintenant.
     pub fn should_train(&self, now: DateTime<Utc>) -> bool {
         let st = self.state.lock();
-        if st.candidate.is_some() {
-            return false; // on attend la réponse de l'utilisateur
+        if st.candidate.is_some() || st.training {
+            return false; // on attend la réponse de l'utilisateur, ou la fin du calcul en cours
         }
         match &st.active {
             Some(m) => (now - m.trained_at).num_seconds() as f64 >= self.cfg.retrain_interval_hours * 3600.0,
@@ -306,20 +410,39 @@ impl Baseline {
 
     /// Entraîne un candidat sur les échantillons validés, sauf ceux que `tainted` désigne
     /// (fenêtres touchées par une alerte à règles), et calcule son diff.
+    ///
+    /// Trois temps : copie des données sous verrou (quelques millisecondes), calcul hors
+    /// verrou (une seconde ou plus sur 200 000 fenêtres), puis publication sous verrou.
     pub fn train(&self, tainted: &dyn Fn(&Sample) -> bool, now: DateTime<Utc>) -> Result<TrainOutcome> {
-        let mut st = self.state.lock();
-        if let Some(c) = &st.candidate {
-            bail!("le modèle candidat v{} attend déjà votre validation", c.model.version);
-        }
-        let training: Vec<&Sample> = st.samples.iter().filter(|s| s.status.learnable() && !tainted(s)).collect();
-        if training.len() < self.cfg.min_training_samples {
-            bail!("{} échantillon(s) utilisable(s), {} nécessaire(s) pour apprendre", training.len(), self.cfg.min_training_samples);
-        }
-        let version = st.next_version.max(1);
-        let model = Model::train(&training, &self.cfg, version, now);
-        let diff = diff::compute(st.active.as_ref(), &model, &training, st.first_profile.as_ref(), self.cfg.drift_factor, self.cfg.contamination);
-        let keys = training.iter().map(|s| (s.host.clone(), s.start)).collect();
+        let (training, active, first_profile, version) = {
+            let mut st = self.state.lock();
+            if let Some(c) = &st.candidate {
+                bail!("le modèle candidat v{} attend déjà votre validation", c.model.version);
+            }
+            if st.training {
+                bail!("un apprentissage est déjà en cours");
+            }
+            let training: Vec<Sample> = st.samples.iter().filter(|s| s.status.learnable() && !tainted(s)).cloned().collect();
+            if training.len() < self.cfg.min_training_samples {
+                bail!("{} échantillon(s) utilisable(s), {} nécessaire(s) pour apprendre", training.len(), self.cfg.min_training_samples);
+            }
+            st.training = true;
+            (training, st.active.clone(), st.first_profile.clone(), st.next_version.max(1))
+        };
+        // Déclaré avant le verrou de publication : détruit après lui.
+        let _busy = TrainingFlag(&self.state);
 
+        let refs: Vec<&Sample> = training.iter().collect();
+        let model = Model::train(&refs, &self.cfg, version, now);
+        let diff = diff::compute(active.as_ref(), &model, &refs, first_profile.as_ref(), self.cfg.drift_factor, self.cfg.contamination);
+        let keys = training.into_iter().map(|s| (s.host, s.start)).collect();
+
+        let mut st = self.state.lock();
+        // Ne devrait pas arriver (retour arrière et validation sont refusés pendant le calcul),
+        // mais un diff calculé contre un autre modèle actif serait trompeur.
+        if st.active.as_ref().map(|m| m.version) != active.as_ref().map(|m| m.version) {
+            bail!("le modèle actif a changé pendant l'apprentissage : relancez-le");
+        }
         if st.active.is_some() && diff.is_empty() {
             self.activate(&mut st, model, now);
             self.log(&mut st, now, "activation_auto", None, format!("modèle v{version} activé : aucun nouveau comportement à valider"), None);
@@ -333,9 +456,14 @@ impl Baseline {
     /// Valide le candidat : chaque machine du diff doit être acceptée ou refusée. Les
     /// fenêtres nouvellement acceptées des machines refusées deviennent suspectes ; le modèle
     /// est alors réentraîné sans elles, puis activé.
+    ///
+    /// Le réapprentissage éventuel se fait hors verrou, comme dans [`Baseline::train`].
     pub fn decide(&self, accepted: &[String], rejected: &[String], now: DateTime<Utc>) -> Result<DecisionOutcome> {
-        let mut st = self.state.lock();
-        let cand = st.candidate.as_ref().ok_or_else(|| anyhow!("aucun modèle candidat en attente"))?;
+        let mut guard = self.state.lock();
+        if guard.training {
+            bail!("un apprentissage est en cours : réessayez dans quelques secondes");
+        }
+        let cand = guard.candidate.as_ref().ok_or_else(|| anyhow!("aucun modèle candidat en attente"))?;
         for h in &cand.diff.hosts {
             match (accepted.contains(&h.host), rejected.contains(&h.host)) {
                 (true, true) => bail!("{} est à la fois acceptée et refusée", h.host),
@@ -343,50 +471,58 @@ impl Baseline {
                 _ => {}
             }
         }
-        let cand = st.candidate.take().expect("vérifié ci-dessus");
+        let cand = guard.candidate.take().expect("vérifié ci-dessus");
+        let st = &mut *guard;
 
         // Fenêtres à exclure : celles que le candidat accepterait pour les machines refusées.
-        let excluded: HashSet<(String, u64)> = cand
-            .diff
-            .hosts
-            .iter()
-            .filter(|h| rejected.contains(&h.host))
-            .flat_map(|h| h.accepted_starts.iter().map(move |&t| (h.host.clone(), t.to_bits())))
-            .collect();
-        for s in st.samples.iter_mut().filter(|s| excluded.contains(&(s.host.clone(), s.start.to_bits()))) {
+        let excluded = Windows::new(
+            cand.diff
+                .hosts
+                .iter()
+                .filter(|h| rejected.contains(&h.host))
+                .flat_map(|h| h.accepted_starts.iter().map(move |&t| (h.host.as_str(), t))),
+        );
+        for s in st.samples.iter_mut().filter(|s| excluded.contains(s)) {
             s.status = SampleStatus::Suspicious;
+            st.pending.push(SampleEvent::Status { host: s.host.clone(), start: s.start, status: s.status });
         }
 
         for h in &cand.diff.hosts {
             let ok = accepted.contains(&h.host);
             let detail = format!("modèle v{} : {} ({} fenêtre(s))", cand.model.version, if ok { "comportement accepté" } else { "comportement refusé" }, h.newly_accepted);
-            self.log(&mut st, now, "validation", Some(&h.host), detail, None);
+            self.log(st, now, "validation", Some(&h.host), detail, None);
         }
+        let outcome = |activated| Ok(DecisionOutcome { activated, rejected: rejected.to_vec() });
 
-        let activated = if excluded.is_empty() {
-            let v = cand.model.version;
-            self.activate(&mut st, cand.model, now);
-            Some(v)
-        } else {
-            // Réapprentissage sans les fenêtres refusées, avec le même numéro de version.
-            let keys: HashSet<(String, u64)> = cand.training.into_iter().map(|(h, t)| (h, t.to_bits())).collect();
-            let training: Vec<&Sample> = st.samples.iter().filter(|s| s.status.learnable() && keys.contains(&(s.host.clone(), s.start.to_bits()))).collect();
-            if training.len() < self.cfg.min_training_samples {
-                None
-            } else {
-                let m = Model::train(&training, &self.cfg, cand.model.version, now);
-                let v = m.version;
-                self.activate(&mut st, m, now);
-                Some(v)
-            }
-        };
-        Ok(DecisionOutcome { activated, rejected: rejected.to_vec() })
+        let version = cand.model.version;
+        if excluded.is_empty() {
+            self.activate(st, cand.model, now);
+            return outcome(Some(version));
+        }
+        // Réapprentissage sans les fenêtres refusées, avec le même numéro de version.
+        let keys = Windows::new(cand.training.iter().map(|(h, t)| (h.as_str(), *t)));
+        let training: Vec<Sample> = st.samples.iter().filter(|s| s.status.learnable() && keys.contains(s)).cloned().collect();
+        if training.len() < self.cfg.min_training_samples {
+            return outcome(None);
+        }
+        st.training = true;
+        drop(guard);
+        let _busy = TrainingFlag(&self.state);
+
+        let refs: Vec<&Sample> = training.iter().collect();
+        let m = Model::train(&refs, &self.cfg, version, now);
+        let mut st = self.state.lock();
+        self.activate(&mut st, m, now);
+        outcome(Some(version))
     }
 
     /// Revient à une version validée précédente. Le candidat éventuel est abandonné : son diff
     /// avait été calculé par rapport à l'ancien modèle actif.
     pub fn rollback(&self, version: u32, now: DateTime<Utc>) -> Result<()> {
         let mut st = self.state.lock();
+        if st.training {
+            bail!("un apprentissage est en cours : réessayez dans quelques secondes");
+        }
         let model = match st.versions.get(&version) {
             Some(m) => m.clone(),
             None => self.storage.as_ref().ok_or_else(|| anyhow!("version v{version} inconnue"))?.load_model(version)?,
@@ -432,12 +568,50 @@ impl Baseline {
         }
     }
 
-    /// Écrit l'état sur disque (sans effet en mode mémoire).
+    /// Écrit sur disque ce qui a changé depuis la dernière sauvegarde (sans effet en mode
+    /// mémoire) : les nouvelles lignes du journal des échantillons, et `state.json` s'il a
+    /// changé. Le journal est réécrit en entier seulement quand il devient trop long.
     pub fn save(&self) -> Result<()> {
         let Some(storage) = &self.storage else { return Ok(()) };
-        // Sérialisation sous verrou (rapide), écriture hors verrou (plus lente).
-        let bytes = serde_json::to_vec(&*self.state.lock())?;
-        storage.save_state(&bytes)
+        let _one = self.saving.lock();
+        let work = self.prepare_save()?;
+        let written = (|| {
+            if let Some(meta) = &work.meta {
+                storage.save_state(meta)?;
+            }
+            if work.rewrite {
+                storage.rewrite_samples(&work.events)
+            } else {
+                storage.append_samples(&work.events)
+            }
+        })();
+        if written.is_err() {
+            // Les modifications retirées de `pending` seraient perdues : tout réécrire la prochaine fois.
+            let mut st = self.state.lock();
+            st.compact = true;
+            st.meta_dirty = true;
+        }
+        written
+    }
+
+    /// Prépare une sauvegarde sous verrou, sans rien écrire : retire les modifications en
+    /// attente, ou copie tous les échantillons si le journal doit être compacté.
+    fn prepare_save(&self) -> Result<SaveWork> {
+        let mut st = self.state.lock();
+        let meta = if st.meta_dirty { Some(serde_json::to_vec(&*st)?) } else { None };
+        st.meta_dirty = false;
+        let rewrite = needs_compaction(st.compact, st.journal_lines + st.pending.len(), st.samples.len());
+        let events = if rewrite {
+            // La copie couvre aussi les modifications en attente : elles sont abandonnées.
+            st.pending.clear();
+            st.compact = false;
+            st.journal_lines = st.samples.len();
+            st.samples.iter().cloned().map(SampleEvent::Add).collect()
+        } else {
+            st.journal_lines += st.pending.len();
+            std::mem::take(&mut st.pending)
+        };
+        Ok(SaveWork { meta, events, rewrite })
     }
 
     /// Active un modèle : il devient la référence, est enregistré, et les exceptions (qu'il a
@@ -461,6 +635,7 @@ impl Baseline {
         st.active_version = Some(v);
         st.active = Some(model);
         st.next_version = v + 1;
+        st.meta_dirty = true;
         tracing::info!("modèle de comportement normal v{v} activé ({})", now.format("%Y-%m-%d %H:%M"));
     }
 
@@ -476,7 +651,46 @@ impl Baseline {
         while st.decisions.len() > MAX_RECENT_DECISIONS {
             st.decisions.pop_front();
         }
+        st.meta_dirty = true;
     }
+}
+
+/// Reconstruit les échantillons en rejouant le journal dans l'ordre. Un changement de statut
+/// visant une fenêtre inconnue (ligne d'ajout perdue) est ignoré.
+fn replay(events: Vec<SampleEvent>) -> VecDeque<Sample> {
+    let mut samples = VecDeque::with_capacity(events.len());
+    let mut index: HashMap<(String, u64), usize> = HashMap::new();
+    for e in events {
+        match e {
+            SampleEvent::Add(s) => {
+                index.insert((s.host.clone(), s.start.to_bits()), samples.len());
+                samples.push_back(s);
+            }
+            SampleEvent::Status { host, start, status } => {
+                if let Some(&i) = index.get(&(host, start.to_bits())) {
+                    samples[i].status = status;
+                }
+            }
+        }
+    }
+    samples
+}
+
+/// Rétention des échantillons : par ancienneté (temps des paquets, par rapport au plus
+/// récent), puis par nombre.
+fn enforce_retention(samples: &mut VecDeque<Sample>, cfg: &AnomalyConfig) {
+    let Some(last) = samples.back().map(|s| s.end) else { return };
+    let oldest = last - cfg.retention_days * 86_400.0;
+    while samples.front().is_some_and(|s| s.end < oldest) || samples.len() > cfg.max_samples {
+        samples.pop_front();
+    }
+}
+
+/// Vrai si le journal doit être réécrit : demandé explicitement, ou plus de deux fois plus
+/// long (plus une marge) que les échantillons encore conservés. Le coût est amorti : entre
+/// deux compactions, au moins autant de lignes ont été ajoutées que la réécriture en écrit.
+fn needs_compaction(forced: bool, journal_lines: usize, samples: usize) -> bool {
+    forced || journal_lines > 2 * samples + COMPACT_SLACK
 }
 
 /// Explique une fenêtre : les écarts forts, ou à défaut le plus fort, en valeurs lisibles.
@@ -770,5 +984,105 @@ mod tests {
         assert_eq!(r.status().samples.normal, 400);
         assert_eq!(r.new_destinations(A, ["1.1.1.1"].into_iter()), 0);
         assert!(dir.join("decisions.jsonl").exists());
+    }
+
+    /// Nombre de lignes du journal des échantillons.
+    fn journal_lines(dir: &std::path::Path) -> usize {
+        std::fs::read_to_string(dir.join("samples.jsonl")).unwrap().lines().count()
+    }
+
+    // La sauvegarde n'ajoute que ce qui a changé : les fenêtres nouvelles et les changements
+    // de statut. Rien de nouveau : rien n'est écrit. Tout est retrouvé au redémarrage.
+    #[test]
+    fn save_is_incremental() {
+        let dir = temp_dir("incremental");
+        let c = AnomalyConfig { data_dir: dir.display().to_string(), ..cfg() };
+        let b = Baseline::open(c.clone()).unwrap();
+        feed(&b, 0, 200, 2.0);
+        b.save().unwrap();
+        assert_eq!(journal_lines(&dir), 400);
+        assert!(!std::fs::read_to_string(dir.join("state.json")).map(|s| s.contains("\"samples\"")).unwrap_or(false));
+
+        b.train(&never, Utc::now()).unwrap();
+        b.decide(&[A.into(), B.into()], &[], Utc::now()).unwrap();
+        let mut odd = [2.0; features::N];
+        odd[0] = 9.0;
+        b.record_window(A, 1e6, 1e6 + 300.0, odd);
+        b.feedback(A, 1e6, 1e6, FeedbackVerdict::Suspect, FeedbackScope::Once, "", &[], Utc::now()).unwrap();
+        b.save().unwrap();
+        // Une fenêtre ajoutée + son changement de statut, pas 401 lignes réécrites.
+        assert_eq!(journal_lines(&dir), 402);
+        b.save().unwrap();
+        assert_eq!(journal_lines(&dir), 402);
+
+        let r = Baseline::open(c).unwrap();
+        let counts = r.status().samples;
+        assert_eq!((counts.normal, counts.suspicious, counts.flagged), (400, 1, 0));
+    }
+
+    // Compaction : le journal réécrit ne contient plus qu'une ligne par échantillon conservé,
+    // avec son dernier statut.
+    #[test]
+    fn compaction_rewrites_current_samples() {
+        let dir = temp_dir("compaction");
+        let c = AnomalyConfig { data_dir: dir.display().to_string(), ..cfg() };
+        let b = Baseline::open(c.clone()).unwrap();
+        feed(&b, 0, 200, 2.0);
+        b.train(&never, Utc::now()).unwrap();
+        b.decide(&[A.into(), B.into()], &[], Utc::now()).unwrap();
+        let mut odd = [2.0; features::N];
+        odd[0] = 9.0;
+        b.record_window(A, 1e6, 1e6 + 300.0, odd);
+        b.save().unwrap();
+        b.feedback(A, 1e6, 1e6, FeedbackVerdict::Suspect, FeedbackScope::Once, "", &[], Utc::now()).unwrap();
+        b.state.lock().compact = true;
+        b.save().unwrap();
+        assert_eq!(journal_lines(&dir), 401);
+        assert_eq!(Baseline::open(c).unwrap().status().samples.suspicious, 1);
+    }
+
+    // Ancien format (échantillons dans state.json) : repris au chargement, puis déplacés
+    // dans le journal à la première sauvegarde.
+    #[test]
+    fn legacy_state_is_migrated() {
+        let dir = temp_dir("legacy");
+        let c = AnomalyConfig { data_dir: dir.display().to_string(), ..cfg() };
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = serde_json::json!({ "samples": [sample(A, 0, 2.0), sample(A, 1, 2.0)], "next_version": 1 });
+        std::fs::write(dir.join("state.json"), legacy.to_string()).unwrap();
+
+        let b = Baseline::open(c.clone()).unwrap();
+        assert_eq!(b.status().samples.normal, 2);
+        b.save().unwrap();
+        assert_eq!(journal_lines(&dir), 2);
+        assert!(!std::fs::read_to_string(dir.join("state.json")).unwrap().contains("\"samples\""));
+        assert_eq!(Baseline::open(c).unwrap().status().samples.normal, 2);
+    }
+
+    // Le journal n'est réécrit qu'au-delà de deux fois sa taille utile (plus la marge), ou sur demande.
+    #[test]
+    fn compaction_threshold() {
+        assert!(!needs_compaction(false, 2 * 1000 + COMPACT_SLACK, 1000));
+        assert!(needs_compaction(false, 2 * 1000 + COMPACT_SLACK + 1, 1000));
+        assert!(needs_compaction(true, 0, 0));
+    }
+
+    // Pendant un apprentissage (calcul hors verrou), ni second apprentissage, ni validation,
+    // ni retour arrière ; la détection, elle, continue d'enregistrer des fenêtres.
+    #[test]
+    fn training_in_progress_blocks_concurrent_changes() {
+        let b = trained();
+        b.train(&never, Utc::now()).unwrap(); // v2 auto-activée
+        b.state.lock().training = true;
+        assert!(!b.should_train(Utc::now() + chrono::Duration::days(365)));
+        assert!(b.train(&never, Utc::now()).unwrap_err().to_string().contains("en cours"));
+        assert!(b.rollback(1, Utc::now()).unwrap_err().to_string().contains("en cours"));
+        assert!(b.decide(&[], &[], Utc::now()).unwrap_err().to_string().contains("en cours"));
+        let s = sample(A, 900, 2.0);
+        assert_eq!(b.record_window(A, s.start, s.end, s.features), WindowVerdict::Normal);
+        // Le drapeau est remis à zéro à la fin de l'apprentissage.
+        b.state.lock().training = false;
+        b.train(&never, Utc::now()).unwrap();
+        assert!(!b.state.lock().training);
     }
 }

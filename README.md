@@ -425,7 +425,9 @@ Ce pattern explique aussi l'absence d'état global ou de singleton : l'état par
 
 **Principe** : un objet dédié lit et écrit les données sur leur support ; le reste du code ne manipule que des structures en mémoire.
 
-**Rôles dans Cyward :** `Storage` est le seul à connaître le dossier `data_dir`, ses fichiers (`state.json`, `models/v<N>.json`, `decisions.jsonl`) et leur format. `Baseline` lui confie l'état, les modèles validés et le journal, sans rien savoir des fichiers. L'écriture de l'état est atomique (fichier temporaire, puis renommage).
+**Rôles dans Cyward :** `Storage` est le seul à connaître le dossier `data_dir`, ses fichiers (`state.json`, `samples.jsonl`, `models/v<N>.json`, `decisions.jsonl`) et leur format. `Baseline` lui confie l'état, les échantillons, les modèles validés et le journal, sans rien savoir des fichiers.
+- Les échantillons, la partie volumineuse (jusqu'à 200 000 fenêtres, environ 60 Mo), vont dans un **journal en ajout seul** : chaque sauvegarde n'écrit que les fenêtres nouvelles et les changements de statut. Le journal est réécrit en entier (compaction) seulement quand il dépasse deux fois sa taille utile. Une carte SD de Raspberry Pi n'est ainsi pas usée par des réécritures complètes toutes les 10 minutes.
+- `state.json` (destinations vues, exceptions, version active…) n'est réécrit que s'il a changé. Les réécritures complètes sont atomiques (fichier temporaire, puis renommage), et une dernière ligne de journal coupée par un arrêt brutal est ignorée au chargement.
 
 ```rust
 // src/anomaly/storage.rs
@@ -584,6 +586,8 @@ Pour qu'une règle s'applique aux logs d'une application (nginx, Apache…), ajo
 - Les périodes d'une machine visée par une **alerte à règles** (scan, force brute, C2…) ne sont jamais apprises.
 - Une **dérive cumulée** (volume multiplié ou divisé par plus de `drift_factor` depuis le premier modèle validé) lève une alerte `baseline_drift` : elle bloque l'empoisonnement par petits pas.
 - Les modèles validés sont versionnés, avec **retour arrière**, et chaque décision est inscrite dans un **journal** (`decisions.jsonl`).
+
+**Sans gêner la détection :** l'apprentissage (environ 1 s pour 200 000 fenêtres sur un PC, davantage sur un Raspberry Pi) calcule sur une copie des données, sans tenir le verrou que le moteur de détection prend à chaque fin de fenêtre. Pendant ce calcul, un second apprentissage, une validation ou un retour arrière sont refusés avec un message. La sauvegarde, incrémentale, s'exécute dans un thread dédié.
 
 **Mise en route :**
 1. Activer `[detection.anomaly]` avec un `data_dir`, et définir `web.token` : sans jeton, le dashboard ne permet ni de répondre ni de valider.
@@ -1110,13 +1114,13 @@ Avec `AmbientCapabilities`, le `setcap` sur le binaire n'est pas nécessaire.
 cargo test
 ```
 
-71 tests couvrent :
+78 tests couvrent :
 - le parsing des paquets et du DNS ;
 - chaque détecteur, cas positifs et négatifs (un scan lent ou un trafic irrégulier ne doivent pas déclencher), et le plafond mémoire des détecteurs exposés aux adresses usurpées ;
 - les règles de logs ;
 - la fusion des alertes ;
 - l'extraction du JSON renvoyé par le modèle ;
-- l'apprentissage du comportement normal : l'Isolation Forest (point isolé, reproductibilité, sérialisation), les caractéristiques, le diff (bruit, nouveau comportement, dérive), le cycle de vie complet avec ses garde-fous (validation obligatoire, réponses, exceptions, refus, fenêtres exclues, retour arrière), la persistance ;
+- l'apprentissage du comportement normal : l'Isolation Forest (point isolé, reproductibilité, sérialisation), les caractéristiques, le diff (bruit, nouveau comportement, dérive), le cycle de vie complet avec ses garde-fous (validation obligatoire, réponses, exceptions, refus, fenêtres exclues, retour arrière, calcul en cours qui bloque les décisions concurrentes), la persistance (sauvegarde incrémentale, compaction, reprise de l'ancien format, ligne coupée) ;
 - le contrôle d'accès des routes d'écriture et le résumé de la bannière.
 
 ### Simulation d'attaques

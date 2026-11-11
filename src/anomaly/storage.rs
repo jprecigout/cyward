@@ -3,10 +3,15 @@
 //!
 //! ```text
 //! <data_dir>/
-//! ├── state.json        échantillons, destinations vues, exceptions, version active…
+//! ├── state.json        destinations vues, exceptions, version active… (petit, réécrit s'il change)
+//! ├── samples.jsonl     journal des échantillons : ajouts et changements de statut (ajout seul,
+//! │                     réécrit en entier quand il devient trop long)
 //! ├── decisions.jsonl   journal des décisions, une ligne JSON par décision (ajout seul)
 //! └── models/v<N>.json  modèles validés, pour le retour arrière
 //! ```
+//!
+//! Les échantillons sont la partie volumineuse (jusqu'à `max_samples` fenêtres, des dizaines
+//! de Mo) : les réécrire à chaque sauvegarde userait inutilement une carte SD.
 
 use std::{
     fs::{self, OpenOptions},
@@ -51,6 +56,42 @@ impl Storage {
         let tmp = self.dir.join("state.json.tmp");
         fs::write(&tmp, bytes).with_context(|| format!("écriture de {}", tmp.display()))?;
         fs::rename(&tmp, self.dir.join("state.json")).context("remplacement de state.json")
+    }
+
+    /// Lignes du journal des échantillons, ou `None` s'il n'existe pas encore. Une ligne
+    /// illisible (dernière ligne coupée par un arrêt brutal) est ignorée, pas fatale.
+    pub fn load_samples<T: DeserializeOwned>(&self) -> Result<Option<Vec<T>>> {
+        let path = self.dir.join("samples.jsonl");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(&path).with_context(|| format!("lecture de {}", path.display()))?;
+        let mut bad = 0;
+        let items = raw
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| serde_json::from_str(l).map_err(|_| bad += 1).ok())
+            .collect();
+        if bad > 0 {
+            tracing::warn!("{bad} ligne(s) illisible(s) ignorée(s) dans {}", path.display());
+        }
+        Ok(Some(items))
+    }
+
+    /// Ajoute des lignes au journal des échantillons.
+    pub fn append_samples<T: Serialize>(&self, items: &[T]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let f = OpenOptions::new().create(true).append(true).open(self.dir.join("samples.jsonl")).context("ouverture de samples.jsonl")?;
+        write_lines(f, items).context("écriture de samples.jsonl")
+    }
+
+    /// Remplace tout le journal des échantillons (compaction), de façon atomique.
+    pub fn rewrite_samples<T: Serialize>(&self, items: &[T]) -> Result<()> {
+        let tmp = self.dir.join("samples.jsonl.tmp");
+        write_lines(fs::File::create(&tmp).with_context(|| format!("création de {}", tmp.display()))?, items).with_context(|| format!("écriture de {}", tmp.display()))?;
+        fs::rename(&tmp, self.dir.join("samples.jsonl")).context("remplacement de samples.jsonl")
     }
 
     fn model_path(&self, version: u32) -> PathBuf {
@@ -98,6 +139,17 @@ impl Storage {
     }
 }
 
+/// Écrit une ligne JSON par élément, avec un tampon (une écriture système par bloc, pas par ligne).
+fn write_lines<T: Serialize>(f: fs::File, items: &[T]) -> Result<()> {
+    let mut w = std::io::BufWriter::new(f);
+    for item in items {
+        serde_json::to_writer(&mut w, item)?;
+        w.write_all(b"\n")?;
+    }
+    w.flush()?;
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -116,6 +168,27 @@ pub(crate) mod tests {
         assert!(s.load_state::<Vec<u32>>().unwrap().is_none());
         s.save_state(&serde_json::to_vec(&vec![1u32, 2, 3]).unwrap()).unwrap();
         assert_eq!(s.load_state::<Vec<u32>>().unwrap(), Some(vec![1, 2, 3]));
+    }
+
+    // Journal des échantillons : absent au départ, les ajouts s'accumulent, la réécriture remplace tout.
+    #[test]
+    fn samples_journal_appends_then_rewrites() {
+        let s = Storage::open(&temp_dir("samples")).unwrap();
+        assert!(s.load_samples::<u32>().unwrap().is_none());
+        s.append_samples(&[1u32, 2]).unwrap();
+        s.append_samples(&[3u32]).unwrap();
+        assert_eq!(s.load_samples::<u32>().unwrap(), Some(vec![1, 2, 3]));
+        s.rewrite_samples(&[9u32]).unwrap();
+        assert_eq!(s.load_samples::<u32>().unwrap(), Some(vec![9]));
+    }
+
+    // Une dernière ligne coupée (arrêt brutal pendant l'ajout) n'empêche pas de relire le reste.
+    #[test]
+    fn truncated_journal_line_is_skipped() {
+        let s = Storage::open(&temp_dir("truncated")).unwrap();
+        s.append_samples(&[1u32, 2]).unwrap();
+        OpenOptions::new().append(true).open(s.dir().join("samples.jsonl")).unwrap().write_all(b"[1, 2").unwrap();
+        assert_eq!(s.load_samples::<u32>().unwrap(), Some(vec![1, 2]));
     }
 
     // Le nettoyage garde les versions récentes et ne supprime jamais la version protégée.

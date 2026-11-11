@@ -138,6 +138,8 @@ detect/anomaly.rs (HostAnomaly) ─► anomaly::Baseline ◄─ anomaly::trainer
 - les fenêtres touchées par une alerte à règles (`!AlertKind::is_learning()`) sont exclues de l'apprentissage (`trainer::tainted_by_rules`) ;
 - le LLM peut suggérer un motif, jamais valider ;
 - l'Isolation Forest isole immédiatement une valeur hors de la plage vue à un nœud (correctif du « masquage », voir `iforest.rs`) ; le diff ignore le bruit de seuil (2 × `contamination`, au moins 3 fenêtres) ;
+- le verrou de `Baseline` n'est jamais tenu pendant un calcul long ni une écriture disque, car le moteur le prend à chaque fin de fenêtre : apprentissage en trois temps (copie sous verrou, calcul hors verrou, publication) avec le drapeau `training`, sauvegarde préparée sous verrou (`prepare_save`) puis écrite hors verrou, appelée via `trainer::save` (thread bloquant) depuis le code asynchrone ;
+- les échantillons sont persistés en journal d'ajouts (`samples.jsonl`, `SampleEvent`) : toute modification d'un échantillon doit pousser l'événement correspondant dans `pending`, sinon elle est perdue au redémarrage. Tout autre changement d'état persisté met `meta_dirty` à vrai ;
 - les données de test de l'apprentissage doivent varier de façon continue (`model::tests::sample`) : des valeurs répétées faussent le seuil par des ex aequo.
 
 Points qui demandent de lire plusieurs fichiers pour être compris :

@@ -203,7 +203,7 @@ async fn feedback(State(s): State<AppState>, Path(id): Path<u64>, Json(body): Js
     match b.feedback(host, from, to, body.verdict, body.scope, body.reason.trim(), &ids, now) {
         Ok(n) => {
             s.sink.store.update(id, |a| a.feedback = Some(Feedback { verdict: body.verdict, reason: body.reason.trim().to_string(), scope: body.scope, at: now }));
-            save(&b);
+            trainer::save(&b).await;
             Json(json!({ "updated_windows": n })).into_response()
         }
         Err(e) => error(StatusCode::CONFLICT, e.to_string()),
@@ -237,7 +237,7 @@ async fn decision(State(s): State<AppState>, Json(body): Json<DecisionBody>) -> 
     match res {
         Ok(Ok(o)) => {
             trainer::emit_rejected(&s.sink, &o.rejected, o.activated);
-            save(&b);
+            trainer::save(&b).await;
             Json(o).into_response()
         }
         Ok(Err(e)) => error(StatusCode::CONFLICT, e.to_string()),
@@ -255,17 +255,10 @@ async fn rollback(State(s): State<AppState>, Json(body): Json<RollbackBody>) -> 
     let Some(b) = s.baseline.clone() else { return disabled() };
     match b.rollback(body.version, Utc::now()) {
         Ok(()) => {
-            save(&b);
+            trainer::save(&b).await;
             Json(json!({ "active": body.version })).into_response()
         }
         Err(e) => error(StatusCode::CONFLICT, e.to_string()),
-    }
-}
-
-/// Sauvegarde après une décision : une réponse de l'utilisateur ne doit pas être perdue.
-fn save(b: &Baseline) {
-    if let Err(e) = b.save() {
-        tracing::error!("sauvegarde de l'apprentissage : {e:#}");
     }
 }
 

@@ -32,9 +32,7 @@ pub fn spawn(baseline: Arc<Baseline>, sink: AlertSink) {
         ticker.tick().await; // le premier tick est immédiat : on laisse d'abord l'agent démarrer
         loop {
             ticker.tick().await;
-            if let Err(e) = baseline.save() {
-                tracing::error!("sauvegarde de l'apprentissage : {e:#}");
-            }
+            save(&baseline).await;
             if baseline.should_train(Utc::now()) {
                 match run_training(baseline.clone(), sink.clone()).await {
                     Ok(o) => tracing::info!("apprentissage du comportement normal : {o:?}"),
@@ -64,8 +62,19 @@ pub async fn run_training(baseline: Arc<Baseline>, sink: AlertSink) -> Result<Tr
             );
         }
     }
-    baseline.save()?;
+    save(&baseline).await;
     Ok(outcome)
+}
+
+/// Sauvegarde dans un thread bloquant (écriture disque, compaction parfois volumineuse),
+/// hors de la boucle asynchrone. Une erreur est journalisée : la suivante réessaiera.
+pub async fn save(baseline: &Arc<Baseline>) {
+    let b = baseline.clone();
+    match tokio::task::spawn_blocking(move || b.save()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!("sauvegarde de l'apprentissage : {e:#}"),
+        Err(e) => tracing::error!("sauvegarde de l'apprentissage interrompue : {e}"),
+    }
 }
 
 /// Lève une alerte par machine dont le nouveau comportement a été refusé.

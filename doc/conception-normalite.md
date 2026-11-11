@@ -181,6 +181,15 @@ Chaque modèle validé est enregistré (`models/v<N>.json`). Les `max_versions` 
 
 Chaque réponse, validation, activation automatique ou retour arrière est ajoutée à `decisions.jsonl` : date, type, machine, détail, motif. Les 100 dernières entrées sont aussi affichées dans le dashboard.
 
+### 4.8 Persistance et cohabitation avec la détection
+
+Deux contraintes d'exploitation, mesurées sur 200 000 fenêtres (le plafond `max_samples`) :
+
+- **Pas de calcul long sous verrou.** Un apprentissage prend environ 1,25 s sur un PC, plusieurs secondes sur un Raspberry Pi. Le moteur de détection prend le verrou de l'état à chaque fin de fenêtre : s'il attendait la fin du calcul, la file de capture (65 536 paquets) pourrait déborder. L'apprentissage se fait donc en trois temps : copie des fenêtres utiles sous verrou, calcul du modèle et du diff hors verrou, publication sous verrou. Pendant le calcul, un second apprentissage, une validation et un retour arrière sont refusés, pour que le résultat ne soit pas déjà périmé à sa publication. La validation qui réentraîne (machines refusées) suit le même schéma.
+- **Pas de réécriture complète à chaque sauvegarde.** L'état complet en JSON pèse environ 62 Mo : le réécrire toutes les 10 minutes représenterait environ 9 Go par jour, de quoi user une carte SD. Les échantillons vont donc dans un journal en ajout seul, `samples.jsonl`, avec une ligne par fenêtre ajoutée ou par changement de statut. Le journal est réécrit (compaction) quand il dépasse deux fois le nombre d'échantillons conservés, plus 10 000 lignes de marge. `state.json` ne contient plus que le reste de l'état, et n'est réécrit que s'il a changé. Les écritures se font hors verrou, dans un thread dédié.
+
+Au chargement, le journal est rejoué dans l'ordre, puis la rétention est appliquée. Une dernière ligne coupée par un arrêt brutal est ignorée. Un `state.json` de l'ancien format (échantillons inclus) est repris, puis migré à la première sauvegarde.
+
 ## 5. Garde-fous (récapitulatif)
 
 | Risque | Garde-fou |
@@ -237,7 +246,8 @@ Chaque réponse, validation, activation automatique ou retour arrière est ajout
 - Isolation Forest : un point isolé obtient un score plus élevé que les points d'un nuage ; même graine, même modèle ; sérialisation sans perte ; données constantes sans erreur.
 - Caractéristiques : transformations et encodage de l'heure.
 - Cycle de vie complet, sans réseau : apprentissage initial soumis à validation, activation, anomalie signalée, réponse « normal / désormais » qui crée une exception, réponse « suspect » qui exclut, diff qui liste la machine dont le comportement change, refus qui exclut ses fenêtres, dérive détectée, retour arrière, fenêtres touchées par une alerte à règles exclues.
-- Persistance : sauvegarde puis rechargement d'un état complet.
+- Persistance : sauvegarde puis rechargement d'un état complet ; sauvegarde incrémentale (seules les nouveautés sont ajoutées, rien n'est écrit sans changement) ; compaction ; reprise de l'ancien format ; ligne de journal coupée ignorée.
+- Calcul en cours : second apprentissage, validation et retour arrière refusés, enregistrement des fenêtres toujours possible.
 - Contrôle d'accès de l'API d'écriture.
 - Test de bout en bout : rejeu du pcap d'attaques, apprentissage manuel et validation par l'API, puis second rejeu avec le modèle chargé depuis le disque.
 
