@@ -65,11 +65,13 @@ flowchart TB
 | Élément | Rôle | Pattern |
 |---|---|---|
 | `detect/anomaly.rs` | Agrège le trafic par machine et par fenêtre ; évalue chaque fenêtre | Strategy (nouveau `Detector`) |
-| `anomaly/features.rs` | Transforme les compteurs d'une fenêtre en vecteur de caractéristiques (fonction pure) | — |
+| `anomaly/features.rs` | Transforme les compteurs d'une fenêtre en vecteur de caractéristiques, et explique les écarts d'une fenêtre à un profil (fonctions pures) | — |
 | `anomaly/iforest.rs` | Isolation Forest : apprentissage et score | — |
 | `anomaly/model.rs` | Modèle versionné : forêt, seuil, profils habituels | — |
 | `anomaly/diff.rs` | Ce que le candidat accepterait de plus que le modèle actif (fonction pure) | — |
 | `anomaly/baseline.rs` | État et règles du cycle de vie (échantillons, candidat, validation, exceptions, retour arrière) | Façade |
+| `anomaly/baseline/samples.rs` | Journal des échantillons : événements, rejeu, rétention, règle de compaction (fonctions pures) | — |
+| `anomaly/baseline/status.rs` | Vues renvoyées par `GET /api/baseline` | — |
 | `anomaly/storage.rs` | Lecture et écriture de l'état sur disque | Repository |
 | `anomaly/trainer.rs` | Déclenche l'apprentissage au bon moment | — |
 

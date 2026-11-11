@@ -133,7 +133,7 @@ detect/anomaly.rs (HostAnomaly) ─► anomaly::Baseline ◄─ anomaly::trainer
                                          └─► anomaly::Storage (data_dir)
 ```
 
-**Apprentissage du comportement normal** (`src/anomaly/`, désactivé par défaut) : conception et garde-fous dans `doc/conception-normalite.md`, à lire avant d'y toucher. Invariants à préserver :
+**Apprentissage du comportement normal** (`src/anomaly/`, désactivé par défaut) : conception et garde-fous dans `doc/conception-normalite.md`, à lire avant d'y toucher. `baseline.rs` porte la Façade et les garde-fous ; `baseline/samples.rs` le journal des échantillons (événements, rejeu, rétention, compaction) ; `baseline/status.rs` les vues renvoyées à l'API ; l'explication des anomalies (`explain`) est dans `features.rs`. Invariants à préserver :
 - rien n'entre dans le comportement normal sans validation humaine : une fenêtre `flagged` n'est jamais apprise tant qu'elle est sans réponse, un modèle candidat n'est activé qu'après `decide` (sauf diff vide), aucun apprentissage n'est lancé tant qu'un candidat attend ;
 - les fenêtres touchées par une alerte à règles (`!AlertKind::is_learning()`) sont exclues de l'apprentissage (`trainer::tainted_by_rules`) ;
 - le LLM peut suggérer un motif, jamais valider ;

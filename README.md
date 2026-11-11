@@ -126,6 +126,9 @@ cyward/
     │   ├── model.rs           # échantillons et modèles versionnés
     │   ├── diff.rs            # ce qu'un nouveau modèle accepterait de plus
     │   ├── baseline.rs        # cycle de vie et garde-fous de validation        ③
+    │   ├── baseline/
+    │   │   ├── samples.rs     # journal des échantillons, rétention, compaction
+    │   │   └── status.rs      # état renvoyé au dashboard (GET /api/baseline)
     │   ├── storage.rs         # persistance sur disque                          ⑨
     │   └── trainer.rs         # apprentissages périodiques                      ⑤
     ├── logs.rs                # sources de logs (journalctl, tail -F)          ⑤ ⑦
@@ -1122,7 +1125,7 @@ Avec `AmbientCapabilities`, le `setcap` sur le binaire n'est pas nécessaire.
 cargo test
 ```
 
-83 tests couvrent :
+85 tests couvrent :
 - le parsing des paquets et du DNS ;
 - chaque détecteur, cas positifs et négatifs (un scan lent ou un trafic irrégulier ne doivent pas déclencher), et le plafond mémoire des détecteurs exposés aux adresses usurpées ;
 - les règles de logs, cas positifs et négatifs (lignes ordinaires, regex personnalisée invalide), et le décodage des lignes journald et texte ;

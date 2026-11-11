@@ -8,12 +8,16 @@
 //! - aucun nouvel apprentissage tant qu'un candidat attend une réponse.
 //!
 //! Les méthodes sont synchrones et sans réseau : le détecteur, l'entraîneur et l'API web les
-//! appellent, et les tests les exercent directement.
+//! appellent, et les tests les exercent directement. Le journal des échantillons est dans
+//! [`samples`], les vues renvoyées à l'API dans [`status`].
 //!
 //! Le verrou de l'état n'est jamais tenu pendant un calcul long ni pendant une écriture sur
 //! disque : le moteur de détection le prend à chaque fin de fenêtre, et l'attendre ferait
 //! perdre des paquets. L'apprentissage travaille sur une copie des échantillons, et la
 //! sauvegarde n'ajoute au journal que ce qui a changé depuis la précédente.
+
+mod samples;
+mod status;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -22,26 +26,23 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+pub use self::status::{CandidateInfo, Learning, ModelInfo, SampleCounts, Status};
+use self::samples::{SampleEvent, Windows, covered_hours, enforce_retention, needs_compaction, replay};
 use super::{
     diff::{self, Diff},
-    features::{self, FeatureStat, Features},
+    features::{self, Explained, FeatureStat, Features, explain},
     model::{Model, Sample, SampleStatus},
     storage::Storage,
 };
 use crate::{
     alert::{FeedbackScope, FeedbackVerdict},
-    config::{AnomalyConfig, AnomalyMode},
+    config::AnomalyConfig,
 };
 
 /// Destinations mémorisées par machine pour la caractéristique « destinations nouvelles ».
 const MAX_SEEN_PER_HOST: usize = 2000;
 /// Décisions gardées en mémoire pour l'affichage (le journal sur disque est complet).
 const MAX_RECENT_DECISIONS: usize = 100;
-/// Écart (en dispersions robustes) à partir duquel une caractéristique explique une anomalie.
-const EXPLAIN_Z: f64 = 3.0;
-/// Lignes de journal tolérées en plus des échantillons conservés avant de le réécrire
-/// (compaction). La marge évite de réécrire sans cesse un petit état.
-const COMPACT_SLACK: usize = 10_000;
 
 /// Ce que le détecteur doit faire d'une fenêtre qui vient de se terminer.
 #[derive(Debug, Clone, PartialEq)]
@@ -62,20 +63,6 @@ pub struct AnomalyInfo {
     pub version: u32,
     /// Principaux écarts au profil habituel, du plus fort au plus faible.
     pub deviations: Vec<Explained>,
-}
-
-/// Une caractéristique qui s'écarte de l'habitude, en valeurs lisibles.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Explained {
-    pub index: usize,
-    pub z: f64,
-    pub value: String,
-    /// Valeur de référence, lisible.
-    pub usual: String,
-    /// Référence de comparaison, à afficher : « habituellement 1.2 Mo » si la machine a son
-    /// propre profil, « médiane du réseau 0.0 o » sinon. Sans cette précision, comparer une
-    /// machine peu connue à la médiane de tout le réseau passerait pour son habitude.
-    pub reference: String,
 }
 
 /// Exception accordée par une réponse « normal, désormais ».
@@ -145,39 +132,6 @@ impl From<VecDeque<String>> for Seen {
 impl From<Seen> for VecDeque<String> {
     fn from(s: Seen) -> Self {
         s.order
-    }
-}
-
-/// Modification des échantillons, telle qu'écrite dans le journal `samples.jsonl` : rejouer
-/// le journal dans l'ordre reconstruit les échantillons.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SampleEvent {
-    /// Nouvelle fenêtre enregistrée.
-    Add(Sample),
-    /// Changement de statut d'une fenêtre (réponse de l'utilisateur, refus d'un diff).
-    Status { host: String, start: f64, status: SampleStatus },
-}
-
-/// Ensemble de fenêtres désignées par (machine, début), sans copier les noms de machine.
-/// Le début est comparé par ses bits : c'est la même valeur, relue telle quelle.
-struct Windows<'a>(HashMap<&'a str, HashSet<u64>>);
-
-impl<'a> Windows<'a> {
-    fn new(items: impl IntoIterator<Item = (&'a str, f64)>) -> Self {
-        let mut m: HashMap<&str, HashSet<u64>> = HashMap::new();
-        for (host, start) in items {
-            m.entry(host).or_default().insert(start.to_bits());
-        }
-        Self(m)
-    }
-
-    fn contains(&self, s: &Sample) -> bool {
-        self.0.get(s.host.as_str()).is_some_and(|t| t.contains(&s.start.to_bits()))
-    }
-
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
 }
 
@@ -655,121 +609,6 @@ impl Baseline {
     }
 }
 
-/// Reconstruit les échantillons en rejouant le journal dans l'ordre. Un changement de statut
-/// visant une fenêtre inconnue (ligne d'ajout perdue) est ignoré.
-fn replay(events: Vec<SampleEvent>) -> VecDeque<Sample> {
-    let mut samples = VecDeque::with_capacity(events.len());
-    let mut index: HashMap<(String, u64), usize> = HashMap::new();
-    for e in events {
-        match e {
-            SampleEvent::Add(s) => {
-                index.insert((s.host.clone(), s.start.to_bits()), samples.len());
-                samples.push_back(s);
-            }
-            SampleEvent::Status { host, start, status } => {
-                if let Some(&i) = index.get(&(host, start.to_bits())) {
-                    samples[i].status = status;
-                }
-            }
-        }
-    }
-    samples
-}
-
-/// Rétention des échantillons : par ancienneté (temps des paquets, par rapport au plus
-/// récent), puis par nombre.
-fn enforce_retention(samples: &mut VecDeque<Sample>, cfg: &AnomalyConfig) {
-    let Some(last) = samples.back().map(|s| s.end) else { return };
-    let oldest = last - cfg.retention_days * 86_400.0;
-    while samples.front().is_some_and(|s| s.end < oldest) || samples.len() > cfg.max_samples {
-        samples.pop_front();
-    }
-}
-
-/// Vrai si le journal doit être réécrit : demandé explicitement, ou plus de deux fois plus
-/// long (plus une marge) que les échantillons encore conservés. Le coût est amorti : entre
-/// deux compactions, au moins autant de lignes ont été ajoutées que la réécriture en écrit.
-fn needs_compaction(forced: bool, journal_lines: usize, samples: usize) -> bool {
-    forced || journal_lines > 2 * samples + COMPACT_SLACK
-}
-
-/// Explique une fenêtre : les écarts forts, ou à défaut le plus fort, en valeurs lisibles.
-/// `own_profile` : la machine est comparée à son propre profil (et non à celui du réseau).
-fn explain(x: &Features, profile: &[FeatureStat], own_profile: bool) -> Vec<Explained> {
-    let all = features::deviations(x, profile);
-    let strong: Vec<_> = all.iter().filter(|d| d.z.abs() >= EXPLAIN_Z).take(3).copied().collect();
-    let chosen = if strong.is_empty() { all.into_iter().take(1).collect() } else { strong };
-    chosen
-        .into_iter()
-        .map(|d| {
-            let usual = features::display(d.index, profile[d.index].median);
-            let reference = if own_profile { format!("habituellement {usual}") } else { format!("médiane du réseau {usual}, machine encore peu connue") };
-            Explained { index: d.index, z: d.z, value: features::display(d.index, x[d.index]), usual, reference }
-        })
-        .collect()
-}
-
-/// Durée couverte par les échantillons, en heures (temps des paquets).
-fn covered_hours(samples: &VecDeque<Sample>) -> f64 {
-    let first = samples.iter().map(|s| s.start).reduce(f64::min);
-    let last = samples.iter().map(|s| s.end).reduce(f64::max);
-    match (first, last) {
-        (Some(a), Some(b)) => (b - a) / 3600.0,
-        _ => 0.0,
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct Status {
-    pub enabled: bool,
-    pub mode: AnomalyMode,
-    pub persistent: bool,
-    pub window_secs: f64,
-    pub samples: SampleCounts,
-    pub learning: Learning,
-    pub active: Option<ModelInfo>,
-    pub candidate: Option<CandidateInfo>,
-    pub versions: Vec<u32>,
-    pub exceptions: Vec<Exception>,
-    pub decisions: Vec<Decision>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SampleCounts {
-    pub normal: usize,
-    pub flagged: usize,
-    pub confirmed_normal: usize,
-    pub suspicious: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Learning {
-    pub required_samples: usize,
-    pub required_hours: f64,
-    pub covered_hours: f64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ModelInfo {
-    pub version: u32,
-    pub trained_at: DateTime<Utc>,
-    pub samples: usize,
-    pub threshold: f64,
-    pub hosts: usize,
-}
-
-impl From<&Model> for ModelInfo {
-    fn from(m: &Model) -> Self {
-        Self { version: m.version, trained_at: m.trained_at, samples: m.samples, threshold: m.threshold, hosts: m.hosts.len() }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct CandidateInfo {
-    pub model: ModelInfo,
-    pub diff: Diff,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1057,14 +896,6 @@ mod tests {
         assert_eq!(journal_lines(&dir), 2);
         assert!(!std::fs::read_to_string(dir.join("state.json")).unwrap().contains("\"samples\""));
         assert_eq!(Baseline::open(c).unwrap().status().samples.normal, 2);
-    }
-
-    // Le journal n'est réécrit qu'au-delà de deux fois sa taille utile (plus la marge), ou sur demande.
-    #[test]
-    fn compaction_threshold() {
-        assert!(!needs_compaction(false, 2 * 1000 + COMPACT_SLACK, 1000));
-        assert!(needs_compaction(false, 2 * 1000 + COMPACT_SLACK + 1, 1000));
-        assert!(needs_compaction(true, 0, 0));
     }
 
     // Pendant un apprentissage (calcul hors verrou), ni second apprentissage, ni validation,

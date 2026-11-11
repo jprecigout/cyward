@@ -157,6 +157,40 @@ pub fn deviations(x: &Features, profile: &[FeatureStat]) -> Vec<Deviation> {
     d
 }
 
+/// Écart (en dispersions robustes) à partir duquel une caractéristique explique une anomalie.
+const EXPLAIN_Z: f64 = 3.0;
+
+/// Une caractéristique qui s'écarte de l'habitude, en valeurs lisibles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Explained {
+    pub index: usize,
+    pub z: f64,
+    pub value: String,
+    /// Valeur de référence, lisible.
+    pub usual: String,
+    /// Référence de comparaison, à afficher : « habituellement 1.2 Mo » si la machine a son
+    /// propre profil, « médiane du réseau 0.0 o » sinon. Sans cette précision, comparer une
+    /// machine peu connue à la médiane de tout le réseau passerait pour son habitude.
+    pub reference: String,
+}
+
+/// Explique une fenêtre : les écarts forts, ou à défaut le plus fort, en valeurs lisibles.
+/// `own_profile` : la machine est comparée à son propre profil (et non à celui du réseau).
+pub fn explain(x: &Features, profile: &[FeatureStat], own_profile: bool) -> Vec<Explained> {
+    let all = deviations(x, profile);
+    let strong: Vec<_> = all.iter().filter(|d| d.z.abs() >= EXPLAIN_Z).take(3).copied().collect();
+    let chosen = if strong.is_empty() { all.into_iter().take(1).collect() } else { strong };
+    chosen
+        .into_iter()
+        .map(|d| {
+            let usual = display(d.index, profile[d.index].median);
+            let reference = if own_profile { format!("habituellement {usual}") } else { format!("médiane du réseau {usual}, machine encore peu connue") };
+            Explained { index: d.index, z: d.z, value: display(d.index, x[d.index]), usual, reference }
+        })
+        .collect()
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
