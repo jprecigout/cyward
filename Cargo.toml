@@ -3,7 +3,7 @@ name = "cyward"
 version = "0.1.0"
 edition = "2024"
 description = "Agent de détection d'intrusions réseau et logs, avec triage par un LLM cyber open source"
-license = "MIT"
+license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1"

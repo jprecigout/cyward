@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo-wordmark.svg" alt="Cyward — détection d'intrusions" width="520">
+</p>
+
 # Cyward
 
 **Cyward** est un agent de détection d'intrusions écrit en Rust. On l'installe sur une machine du réseau à protéger. Il observe le trafic réseau et les journaux système, lève des alertes en temps réel quand il repère une attaque ou un comportement anormal, puis fait analyser chaque alerte importante par un **modèle de langage open source spécialisé en cybersécurité**, exécuté en local.
@@ -24,6 +28,7 @@ Tout reste sur ta machine : aucune donnée réseau ni aucun log ne part vers un 
 14. [Sécurité de l'agent lui-même](#14-sécurité-de-lagent-lui-même)
 15. [Limites connues](#15-limites-connues)
 16. [Pistes d'évolution](#16-pistes-dévolution)
+17. [Licence](#17-licence)
 
 ---
 
@@ -444,6 +449,29 @@ Sans `-c`, toutes les valeurs par défaut s'appliquent.
 
 **Choix de l'interface.** Si `capture.interface` est vide, l'agent prend celle qui porte la **route par défaut** (lue dans `/proc/net/route`), c'est-à-dire celle qui voit le trafic vers Internet. Les ponts Docker et les tunnels VPN sont ainsi écartés. À défaut, il prend la première interface active non-loopback.
 
+**Bannière de démarrage.** `run` et `replay --serve` affichent d'abord le logo (bouclier et pulsation), la version, puis un résumé de ce que l'agent va réellement faire, une fois les options appliquées :
+
+```
+  ╭─────────────╮    ██████╗██╗   ██╗██╗    ██╗ █████╗ ██████╗ ██████╗
+  │      ╱╲     │   ██╔════╝╚██╗ ██╔╝██║    ██║██╔══██╗██╔══██╗██╔══██╗
+  │ ────╱  ╲  ──│   ██║      ╚████╔╝ ██║ █╗ ██║███████║██████╔╝██║  ██║
+  │         ╲╱  │   ██║       ╚██╔╝  ██║███╗██║██╔══██║██╔══██╗██║  ██║
+   ╲           ╱    ╚██████╗   ██║   ╚███╔███╔╝██║  ██║██║  ██║██████╔╝
+     ╲       ╱       ╚═════╝   ╚═╝    ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝
+       ╲   ╱        Détection d'intrusions · triage par IA locale
+         V          v0.1.0
+
+  Dashboard   http://127.0.0.1:8080
+  Capture     interface de la route par défaut
+  Logs        journald
+  Modèle IA   hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M
+```
+
+- Dans un terminal, elle est en couleur : bouclier bleu, pulsation verte, nom en dégradé.
+- Les couleurs (de la bannière comme des journaux) sont coupées automatiquement quand la sortie n'est pas un terminal (`docker logs`, journal systemd, redirection vers un fichier), ou si la variable `NO_COLOR` est définie.
+- Si un jeton protège le dashboard, le résumé affiche `?token=…` sans jamais montrer sa valeur.
+- `replay` sans `--serve` n'affiche pas de bannière : sa sortie est un rapport destiné à être lu ou traité par un script.
+
 **Niveau de log** de l'agent : variable `RUST_LOG`, par exemple `RUST_LOG=debug cyward run`. Chaque nouvelle alerte apparaît dans la sortie en `WARN`.
 
 **Analyser une capture faite ailleurs :**
@@ -839,3 +867,24 @@ Un outil de détection est une cible de choix : il voit tout le réseau. Plusieu
 - Modèle d'anomalies léger (Isolation Forest en ONNX) entraîné sur des jeux comme CIC-IDS2017.
 - Détections supplémentaires : ARP spoofing, nouveaux appareils sur le réseau, connexions vers des IP de listes de menaces (abuse.ch, Spamhaus), TLS/JA3/JA4.
 - Capture haute performance avec AF_XDP ou eBPF.
+
+---
+
+## 17. Licence
+
+Cyward est distribué sous la **licence Apache 2.0**. Le texte complet est dans le fichier [`LICENSE`](LICENSE).
+
+En résumé, tu peux utiliser, modifier et redistribuer le code, y compris dans un produit commercial ou fermé, à condition de :
+- joindre une copie de la licence ;
+- signaler les fichiers que tu as modifiés ;
+- conserver les mentions de droits d'auteur existantes.
+
+La licence accorde aussi une licence sur les brevets éventuels des contributeurs. Le logiciel est fourni « tel quel », sans garantie.
+
+**Ce que la licence ne couvre pas :**
+- **Le modèle Foundation-Sec-8B-Instruct** : il n'est pas inclus dans ce dépôt et a sa propre licence, à consulter sur sa [fiche Hugging Face](https://huggingface.co/fdtn-ai/Foundation-Sec-8B-Instruct).
+- **Les dépendances Rust** : chacune garde sa licence. Toutes sont permissives et compatibles avec Apache 2.0 (MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0, CDLA-Permissive-2.0). Pour les lister :
+  ```bash
+  cargo metadata --format-version 1 | jq -r '.packages[] | "\(.name) \(.license)"'
+  ```
+- **L'image Docker** : elle contient des paquets Debian (dont `systemd`) distribués sous leurs propres licences.

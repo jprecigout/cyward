@@ -8,6 +8,24 @@ Cyward est un agent de détection d'intrusions en Rust (Linux). Il capture le tr
 
 Les commentaires, messages de log, textes d'alerte, prompts du LLM et l'interface du dashboard sont **en français** : garder cette langue.
 
+## Règles obligatoires : code commenté et testé
+
+Toute modification de code doit être **commentée** et **testée**. Une modification qui ne respecte pas ces deux règles n'est pas terminée.
+
+**Commentaires** (en français), au niveau de densité du code existant :
+- un en-tête `//!` par module, qui explique son rôle et sa place dans le pipeline ;
+- un `///` sur chaque structure, champ, fonction et constante, avec l'unité des valeurs (secondes, octets…) ;
+- un `//` devant toute logique non évidente : seuils, formules, bornes mémoire, choix de conception. Le commentaire explique **pourquoi**, pas ce que la ligne fait déjà lisiblement ;
+- un commentaire d'une ligne au-dessus de chaque test, qui dit ce qu'il vérifie ;
+- piège : sur les structures clap de `main.rs` (`Cli`, `Command` et leurs champs), un `///` devient du texte de `cyward --help`. Les notes destinées aux développeurs y vont en `//`.
+
+**Tests :**
+- chaque nouvelle fonctionnalité, détecteur, règle de log ou correction de bug a des tests unitaires dans son module (`#[cfg(test)] mod tests`), avec au moins un cas **positif** (ça détecte) et un cas **négatif** (le trafic ou les logs normaux ne déclenchent rien) ;
+- une correction de bug commence par un test qui reproduit le bug ;
+- avant de considérer le travail fini, lancer `cargo test` (tout doit passer) et `cargo clippy --all-targets` (aucun avertissement) ;
+- toute modification de la détection se vérifie aussi par le rejeu de `examples/gen_attacks.rs`, qui doit toujours donner 6 alertes. Si un nouveau détecteur est ajouté, ajouter son scénario au générateur et mettre à jour le nombre attendu ici et dans le README ;
+- toute modification du dashboard se vérifie dans un navigateur, après recompilation (la page est embarquée dans le binaire).
+
 ## Commandes
 
 ```bash

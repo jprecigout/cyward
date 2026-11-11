@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 256" width="720" height="256" role="img" aria-labelledby="title">
+  <title id="title">Cyward — détection d'intrusions</title>
+  <defs>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#58a6ff"/>
+      <stop offset="1" stop-color="#3fb950"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c2533"/>
+      <stop offset="1" stop-color="#0d1117"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-40%" width="140%" height="180%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="inside">
+      <path d="M128 22 L210 52 V120 C210 172 175 211 128 232 C81 211 46 172 46 120 V52 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- Emblème : identique à logo.svg -->
+  <path d="M128 16 L216 48 V120 C216 177 178 219 128 240 C78 219 40 177 40 120 V48 Z"
+        fill="url(#body)" stroke="url(#edge)" stroke-width="10" stroke-linejoin="round"/>
+  <g clip-path="url(#inside)">
+    <circle cx="134" cy="88" r="22" fill="none" stroke="#58a6ff" stroke-width="3" opacity="0.55"/>
+    <circle cx="134" cy="88" r="42" fill="none" stroke="#58a6ff" stroke-width="3" opacity="0.3"/>
+    <circle cx="134" cy="88" r="64" fill="none" stroke="#58a6ff" stroke-width="3" opacity="0.14"/>
+    <path d="M46 140 H90 L102 118 L116 170 L134 88 L150 156 L160 140 H210"
+          fill="none" stroke="#3fb950" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"
+          filter="url(#glow)"/>
+  </g>
+  <circle cx="134" cy="88" r="8" fill="#e6edf3"/>
+
+  <!-- Nom et signature. Le gris moyen reste lisible sur fond clair comme sur fond sombre. -->
+  <text x="260" y="148" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="96" font-weight="700" letter-spacing="1" fill="url(#edge)">Cyward</text>
+  <text x="264" y="196" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="28" letter-spacing="2" fill="#8b949e">DÉTECTION D'INTRUSIONS · IA</text>
+</svg>

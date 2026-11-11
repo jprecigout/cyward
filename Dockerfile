@@ -18,6 +18,9 @@ RUN touch src/main.rs && cargo build --release --locked
 # ---- Exécution ----
 FROM debian:trixie-slim
 
+LABEL org.opencontainers.image.title="cyward" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 # journalctl (paquet systemd) sert à lire le journal de l'hôte monté dans le conteneur.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends systemd ca-certificates \

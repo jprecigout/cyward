@@ -13,6 +13,7 @@
 
 // Déclaration des modules du crate (un fichier ou dossier par module dans src/).
 mod alert;
+mod banner;
 mod capture;
 mod config;
 mod detect;
@@ -91,6 +92,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with_target(false)
+        // Mêmes règles que la bannière : pas de codes couleur hors terminal ni avec NO_COLOR,
+        // sinon `docker logs` et le journal systemd seraient pollués de séquences ANSI.
+        .with_ansi(banner::use_color())
         .init();
 
     let cli = Cli::parse();
@@ -121,10 +125,42 @@ async fn main() -> Result<()> {
             cfg.capture.enabled &= !no_capture;
             cfg.logs.enabled &= !no_logs;
             cfg.llm.enabled &= !no_llm;
+            let capture = match (cfg.capture.enabled, cfg.capture.interface.as_str()) {
+                (false, _) => "désactivée".to_string(),
+                (true, "") => "interface de la route par défaut".to_string(),
+                (true, name) => name.to_string(),
+            };
+            print!("{}", banner::render(&banner_info(&cfg, capture), banner::use_color()));
             run(cfg).await
         }
         Command::Replay { file, serve } => replay(cfg, file, serve).await,
     }
+}
+
+/// Lignes de résumé affichées sous la bannière : ce que l'agent va réellement faire, une fois
+/// la configuration et les options de la ligne de commande appliquées. `capture` décrit la
+/// source des paquets (interface ou fichier rejoué).
+fn banner_info(cfg: &Config, capture: String) -> Vec<(&'static str, String)> {
+    let dashboard = if cfg.web.token.is_empty() {
+        format!("http://{}", cfg.web.listen)
+    } else {
+        format!("http://{}/?token=…", cfg.web.listen)
+    };
+    let logs = if cfg.logs.enabled {
+        // Ex. « journald + 2 fichier(s) » ; « aucune source » si tout est vide dans la config.
+        let mut sources = Vec::new();
+        if cfg.logs.journald {
+            sources.push("journald".to_string());
+        }
+        if !cfg.logs.files.is_empty() {
+            sources.push(format!("{} fichier(s)", cfg.logs.files.len()));
+        }
+        if sources.is_empty() { "aucune source".to_string() } else { sources.join(" + ") }
+    } else {
+        "désactivés".to_string()
+    };
+    let model = if cfg.llm.enabled { cfg.llm.model.clone() } else { "désactivé".to_string() };
+    vec![("Dashboard", dashboard), ("Capture", capture), ("Logs", logs), ("Modèle IA", model)]
 }
 
 /// Démarre la partie commune à `run` et `replay --serve` : stockage des alertes,
@@ -193,6 +229,13 @@ async fn replay(mut cfg: Config, file: PathBuf, serve: bool) -> Result<()> {
     // Le nom du fichier s'affiche à la place de l'interface dans le dashboard.
     *stats.interface.lock() = file.file_name().map(|n| n.to_string_lossy().into_owned());
     let sink = if serve {
+        // Bannière seulement avec --serve : sans, la sortie est un rapport destiné à être lu
+        // ou traité par un script, que la bannière encombrerait.
+        // Le rejeu ne lit jamais les logs système : on le reflète dans la config pour que le
+        // résumé de la bannière affiche « désactivés » plutôt que « journald ».
+        cfg.logs.enabled = false;
+        let source = format!("rejeu de {}", file.display());
+        print!("{}", banner::render(&banner_info(&cfg, source), banner::use_color()));
         start_pipeline(&cfg, &stats)?
     } else {
         // Store seul, sans dashboard ni LLM, assez grand pour garder toutes les alertes du fichier.
@@ -253,5 +296,43 @@ async fn run_engine(mut engine: Engine, mut rx: mpsc::Receiver<PacketMeta>, sink
     // Fin de rejeu : clore les fenêtres en cours (volume notamment).
     for a in engine.tick(last_ts + 3600.0) {
         sink.emit(a);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Valeur d'une ligne du résumé, par son libellé.
+    fn value<'a>(info: &'a [(&str, String)], label: &str) -> &'a str {
+        info.iter().find(|(l, _)| *l == label).map(|(_, v)| v.as_str()).unwrap()
+    }
+
+    // Configuration par défaut : dashboard sans jeton, journald seul, modèle par défaut.
+    #[test]
+    fn banner_info_default_config() {
+        let info = banner_info(&Config::default(), "eth0".into());
+        assert_eq!(value(&info, "Dashboard"), "http://127.0.0.1:8080");
+        assert_eq!(value(&info, "Capture"), "eth0");
+        assert_eq!(value(&info, "Logs"), "journald");
+        assert_eq!(value(&info, "Modèle IA"), Config::default().llm.model);
+    }
+
+    // Étages désactivés, jeton défini, fichiers de logs : le résumé le reflète, sans jamais
+    // afficher la valeur du jeton.
+    #[test]
+    fn banner_info_reflects_overrides() {
+        let mut cfg = Config::default();
+        cfg.web.token = "secret".into();
+        cfg.logs.files = vec!["/var/log/auth.log".into(), "/var/log/nginx/access.log".into()];
+        cfg.llm.enabled = false;
+        let info = banner_info(&cfg, "désactivée".into());
+        assert_eq!(value(&info, "Dashboard"), "http://127.0.0.1:8080/?token=…");
+        assert!(info.iter().all(|(_, v)| !v.contains("secret")));
+        assert_eq!(value(&info, "Logs"), "journald + 2 fichier(s)");
+        assert_eq!(value(&info, "Modèle IA"), "désactivé");
+
+        cfg.logs.enabled = false;
+        assert_eq!(value(&banner_info(&cfg, String::new()), "Logs"), "désactivés");
     }
 }
