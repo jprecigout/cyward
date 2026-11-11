@@ -968,12 +968,13 @@ Apprentissage du comportement normal (section 3.9).
 
 Ouvre `http://127.0.0.1:8080`, ou `http://hôte:8080/?token=…` si un jeton est défini.
 
-- **Bandeau du haut** : interface écoutée, paquets et débit, volume, paquets perdus, lignes de logs lues, état du modèle et nombre d'analyses faites. Le point vert devient rouge si la connexion à l'agent est perdue.
-- **Compteurs par sévérité** : cliquer sur l'un d'eux filtre la liste.
+- **Bandeau du haut** : interface écoutée et pastille « En direct », qui passe au rouge (« Déconnecté ») si la connexion à l'agent est perdue.
+- **Tuiles de statistiques** : débit en paquets par seconde avec sa courbe sur les deux dernières minutes, paquets capturés, volume, paquets perdus, lignes de logs lues, état du modèle et nombre d'analyses faites.
+- **Compteurs par sévérité** : nombre d'alertes et part du total ; cliquer sur l'un d'eux filtre la liste.
 - **Filtres** : recherche libre (IP, titre, type), source (réseau ou logs), verdict de l'IA.
-- **Panneau « Comportement normal »** (si l'apprentissage est activé) : modèle actif ou progression de l'apprentissage, fenêtres par statut, bouton « Lancer un apprentissage », retour à une version précédente. Quand un modèle candidat attend, son diff s'affiche machine par machine, avec « Accepter » ou « Refuser » pour chacune, « Tout accepter », « Tout refuser », et les machines peu actives repliées. Suivent les exceptions actives et les dernières décisions.
+- **Panneau « Comportement normal »** (si l'apprentissage est activé) : modèle actif ou progression de l'apprentissage (avec une barre d'avancement), fenêtres par statut, bouton « Lancer un apprentissage », retour à une version précédente. Quand un modèle candidat attend, son diff s'affiche machine par machine, avec « Accepter » ou « Refuser » pour chacune, « Tout accepter », « Tout refuser », et les machines peu actives repliées. Suivent les exceptions actives et les dernières décisions.
 - **Question « est-ce normal ? »** : dans le détail d'une anomalie, un motif, une portée, et les boutons « C'est normal » et « C'est suspect ». La réponse donnée s'affiche ensuite à la place.
-- **Liste des alertes** : mise à jour en direct, sans recharger la page. Une nouvelle alerte clignote brièvement. Le badge indique l'état du triage : en attente, verdict avec confiance, ou échec.
+- **Liste des alertes** : mise à jour en direct, sans recharger la page. Le titre de la section indique combien d'alertes sont affichées. Une nouvelle alerte s'illumine brièvement. Le badge indique l'état du triage : en attente, verdict avec confiance, ou échec.
 - **Détail d'une alerte**, en cliquant dessus :
   - à gauche : description, source, cible, dates, occurrences et preuves brutes en JSON ;
   - à droite : l'analyse de l'IA, avec verdict, jauge de confiance, explication, liens vers les fiches MITRE ATT&CK et recommandations numérotées.
