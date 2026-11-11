@@ -20,6 +20,7 @@ mod config;
 mod detect;
 mod llm;
 mod logs;
+mod names;
 mod stats;
 mod web;
 
@@ -204,8 +205,10 @@ fn start_pipeline(cfg: &Config, stats: &Arc<Stats>, baseline: Option<Arc<Baselin
     // sans arrêter la détection.
     let (listen, token) = (cfg.web.listen.clone(), cfg.web.token.clone());
     let (web_sink, stats) = (sink.clone(), stats.clone());
+    // Les mêmes réseaux internes que la détection décident des adresses dont on demande le nom.
+    let resolver = Arc::new(names::Resolver::new(cfg.names.clone(), cfg.detection.local_networks.clone()));
     tokio::spawn(async move {
-        if let Err(e) = web::serve(&listen, token, web_sink, stats, baseline).await {
+        if let Err(e) = web::serve(&listen, token, web_sink, stats, baseline, resolver).await {
             tracing::error!("dashboard arrêté : {e:#}");
         }
     });

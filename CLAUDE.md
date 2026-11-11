@@ -21,7 +21,8 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
   | `anomaly/` | `alert`, `config` |
   | `logs.rs` (et `logs/rules.rs`) | `alert`, `config`, `stats` |
   | `llm.rs` | `alert`, `config`, `stats` |
-  | `web.rs` | `alert`, `anomaly`, `stats` |
+  | `web.rs` | `alert`, `anomaly`, `names`, `stats` |
+  | `names.rs` | `alert`, `config` |
 
   Les producteurs d'alertes (`detect/`, `logs.rs`) ne dépendent jamais des consommateurs (`llm`, `web`), et inversement. `anomaly/` (apprentissage du comportement normal) ne dépend ni de `detect`, ni de `llm`, ni de `web` : ce sont eux qui l'utilisent. Seul `main.rs` assemble le tout (racine de composition).
 - **Logique pure séparée des entrées/sorties** : le parsing et la décision (`parse_packet`, `parse_dns_query`, `LogAnalyzer::analyze`, `parse_analysis`, les détecteurs, et dans `anomaly/` les caractéristiques, l'Isolation Forest et le diff) ne font aucune I/O. C'est ce qui les rend testables sans réseau, sans fichier, sans LLM. Les I/O (sockets, sous-processus, HTTP) restent en bordure.

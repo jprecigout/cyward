@@ -115,6 +115,8 @@
   .meta .kind { color: var(--text); opacity: .75; }
   .meta .ip { font-family: var(--mono); font-size: 11.5px; }
   .meta .count { color: var(--c); font-weight: 700; }
+  /* Nom de la machine (DNS inverse), en pastille à côté de son adresse. */
+  .host { display: inline-block; margin-left: 5px; padding: 0 6px; border-radius: 5px; font-family: var(--sans); font-size: 11px; font-weight: 600; line-height: 1.6; color: #c4b5fd; background: rgba(167, 139, 250, .13); vertical-align: 1px; }
   .time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
   .chev { width: 16px; height: 16px; color: var(--faint); transition: transform .2s; }
   .alert.open .chev { transform: rotate(180deg); color: var(--text); }
@@ -133,8 +135,8 @@
   h4 { margin: 0 0 8px; font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
   .details p { margin: 0 0 12px; }
   .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 13px; margin-bottom: 14px; padding: 10px 12px; border-radius: 10px; background: var(--sunken); border: 1px solid var(--border); }
-  .kv span:nth-child(odd) { color: var(--muted); }
-  .kv span:nth-child(even) { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+  .kv > span:nth-child(odd) { color: var(--muted); }
+  .kv > span:nth-child(even) { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
   pre { background: var(--sunken); color: #c9d6ea; border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin: 0; font: 12px/1.5 var(--mono); overflow: auto; max-height: 280px; white-space: pre-wrap; word-break: break-all; }
   /* Encadré de l'analyse IA (--v = couleur du verdict) : jauge de confiance, liens MITRE, recommandations. */
   .ai { --v: var(--accent); position: relative; overflow: hidden; border-radius: 12px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--accent-2) 22%, transparent); background: linear-gradient(160deg, rgba(167, 139, 250, .1), rgba(106, 168, 255, .04) 50%, transparent), var(--panel-2); }
@@ -243,7 +245,7 @@
   <div class="section-head"><h2>Alertes</h2><span class="meta" id="shown"></span></div>
   <!-- Filtres : chaque modification relance renderAll(). -->
   <div class="toolbar">
-    <input id="search" type="search" placeholder="Filtrer par IP, titre, type…">
+    <input id="search" type="search" placeholder="Filtrer par IP, nom de machine, titre, type…">
     <select id="source">
       <option value="">Toutes les sources</option>
       <option value="network">Réseau</option>
@@ -307,6 +309,10 @@ async function post(path, body) {
 const alerts = new Map();
 const open = new Set();
 let minSeverity = null;
+// Noms des machines par valeur src/dst (null = déjà demandé, sans nom), et valeurs à demander.
+const hostNames = new Map();
+const nameQueue = new Set();
+let nameTimer = null;
 // Mesure précédente, pour calculer le débit en paquets par seconde, et historique de ce débit.
 let lastPackets = null, lastTime = null;
 const ppsHistory = [];
@@ -314,7 +320,7 @@ const ppsHistory = [];
 // Construit le DOM sans innerHTML : les champs viennent du réseau et des logs, donc d'un attaquant potentiel.
 // el("div", { class: "x", onclick: f }, enfant1, [enfant2, enfant3]) : les attributs « on… » deviennent
 // des écouteurs d'événements, les enfants texte sont insérés comme texte (jamais interprétés en HTML),
-// les tableaux sont aplatis et null est ignoré (pratique pour les éléments conditionnels).
+// les tableaux sont aplatis (même imbriqués) et null est ignoré (pratique pour les éléments conditionnels).
 function el(tag, attrs = {}, ...children) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -323,7 +329,7 @@ function el(tag, attrs = {}, ...children) {
     else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
     else e.setAttribute(k, v);
   }
-  for (const c of children.flat()) if (c != null) e.append(c instanceof Node ? c : String(c));
+  for (const c of children.flat(Infinity)) if (c != null) e.append(c instanceof Node ? c : String(c));
   return e;
 }
 
@@ -387,10 +393,42 @@ function renderAnalysis(a) {
   );
 }
 
-// Résumé sous le titre d'une alerte : type, source → cible (en police à chasse fixe), répétitions.
+// Une adresse IPv4 (avec port éventuel) ou IPv6 : seules ces valeurs ont un nom de machine.
+const looksLikeIp = (v) => /^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(v) || /^[0-9a-f]*:[0-9a-f:.]*$/i.test(v);
+
+// Adresse suivie du nom de la machine s'il est connu. Une adresse jamais vue est mise en file :
+// son nom arrivera par flushNames(), qui redessinera la carte.
+function hostLabel(v) {
+  if (looksLikeIp(v) && !hostNames.has(v) && !nameQueue.has(v)) {
+    nameQueue.add(v);
+    nameTimer ??= setTimeout(flushNames, 150);
+  }
+  const name = hostNames.get(v);
+  return [el("span", { class: "ip" }, v), name ? el("span", { class: "host", title: "Nom de la machine (DNS inverse)" }, name) : null];
+}
+
+// Demande au serveur les noms des adresses en file (64 par requête, la limite de l'API), puis
+// redessine ce qui les affiche. Les adresses sans nom sont notées pour ne pas être redemandées.
+async function flushNames() {
+  nameTimer = null;
+  const batch = [...nameQueue].slice(0, 64);
+  batch.forEach(v => { nameQueue.delete(v); hostNames.set(v, null); });
+  if (nameQueue.size) nameTimer = setTimeout(flushNames, 150);
+  try {
+    const found = await (await fetch(q(`/api/names?ips=${encodeURIComponent(batch.join(","))}`))).json();
+    const entries = Object.entries(found);
+    if (!entries.length) return;
+    for (const [v, name] of entries) hostNames.set(v, name);
+    // Cartes affichées redessinées à l'identique, avec les noms ; panneau d'apprentissage aussi.
+    document.querySelectorAll("#alerts .alert").forEach(card => card.replaceWith(renderAlert(alerts.get(Number(card.dataset.id)))));
+    lastBaseline = ""; refreshBaseline();
+  } catch { /* sans réponse, les adresses restent affichées seules */ }
+}
+
+// Résumé sous le titre d'une alerte : type, source → cible (adresses et noms), répétitions.
 function alertMeta(a) {
   const parts = [el("span", { class: "kind" }, a.kind.replaceAll("_", " "))];
-  if (a.src || a.dst) parts.push(" · ", el("span", { class: "ip" }, [a.src, a.dst].filter(Boolean).join(" → ")));
+  if (a.src || a.dst) parts.push(" · ", a.src ? hostLabel(a.src) : null, a.src && a.dst ? " → " : null, a.dst ? hostLabel(a.dst) : null);
   if (a.count > 1) parts.push(" · ", el("span", { class: "count" }, `×${a.count}`));
   return el("div", { class: "meta" }, parts);
 }
@@ -411,8 +449,8 @@ function renderAlert(a, fresh = false) {
         el("h4", {}, "Détection"),
         el("p", {}, a.description || "—"),
         el("div", { class: "kv" },
-          el("span", {}, "Source"), el("span", {}, a.src || "—"),
-          el("span", {}, "Cible"), el("span", {}, a.dst || "—"),
+          el("span", {}, "Source"), el("span", {}, a.src ? hostLabel(a.src) : "—"),
+          el("span", {}, "Cible"), el("span", {}, a.dst ? hostLabel(a.dst) : "—"),
           el("span", {}, "Première vue"), el("span", {}, fmtTime(a.first_seen)),
           el("span", {}, "Dernière vue"), el("span", {}, fmtTime(a.last_seen)),
           el("span", {}, "Occurrences"), el("span", {}, a.count)),
@@ -431,7 +469,7 @@ function matches(a) {
   if (v === "pending" && a.triage !== "pending") return false;
   if (v && v !== "pending" && a.analysis?.verdict !== v) return false;
   const s = document.getElementById("search").value.trim().toLowerCase();
-  if (s && ![a.title, a.kind, a.src, a.dst, a.description].some(x => x && x.toLowerCase().includes(s))) return false;
+  if (s && ![a.title, a.kind, a.src, a.dst, a.description, hostNames.get(a.src), hostNames.get(a.dst)].some(x => x && x.toLowerCase().includes(s))) return false;
   return true;
 }
 
@@ -632,7 +670,7 @@ function renderCandidate(c, act, disabled) {
   const cards = d.hosts.map(h => {
     const card = el("div", { class: `host-diff${h.drift.length ? " drift" : ""}${choices[h.host] ? ` chosen-${choices[h.host]}` : ""}` },
       el("div", { class: "line" },
-        el("strong", {}, h.host),
+        el("strong", {}, hostLabel(h.host)),
         h.new_host ? el("span", { class: "badge" }, "nouvelle machine") : null,
         h.drift.length ? el("span", { class: "warn" }, "⚠ dérive cumulée depuis le premier modèle") : null),
       el("p", { class: "meta" }, d.first_model

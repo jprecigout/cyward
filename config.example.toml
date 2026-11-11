@@ -106,3 +106,13 @@ queue_size = 32
 listen = "127.0.0.1:8080"
 # Obligatoire si vous exposez le dashboard au-delà de localhost : il affiche la topologie de votre réseau.
 token = ""
+
+# Noms des machines affichés à côté des adresses (DNS inverse).
+[names]
+enabled = true
+# Résoudre aussi les adresses externes : le serveur DNS du propriétaire de l'adresse apprend alors qu'elle est examinée.
+external = false
+# Vide = premier nameserver de /etc/resolv.conf.
+nameserver = ""
+timeout_ms = 1000
+cache_secs = 3600

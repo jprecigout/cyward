@@ -38,3 +38,9 @@ listen = "127.0.0.1:8080"
 # Obligatoire pour répondre « est-ce normal ? » et valider les modèles depuis le dashboard
 # (ouvrir ensuite http://127.0.0.1:8080/?token=…). Générer une valeur : openssl rand -hex 32
 token = ""
+
+[names]
+# Noms des machines (DNS inverse) à côté des adresses. Avec le réseau de l'hôte, le conteneur
+# utilise le résolveur de l'hôte (/etc/resolv.conf), donc les noms donnés par la box.
+enabled = true
+external = false

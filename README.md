@@ -135,6 +135,7 @@ cyward/
     ├── logs/
     │   └── rules.rs           # trait LogRule et règles d'analyse              ①
     ├── llm.rs                 # client du modèle, prompt, décodage du verdict  ⑤
+    ├── names.rs               # noms des machines (DNS inverse, avec cache)
     └── web.rs                 # serveur HTTP, API JSON, flux SSE               ④ ⑥
 ```
 
@@ -183,6 +184,11 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 **`web.rs`** — observateur ④ (flux SSE), Middleware ⑥
 - Serveur `axum`. Il sert le dashboard, une API JSON et un flux Server-Sent Events pour les mises à jour en direct.
 
+**`names.rs`**
+- Donne le nom des machines (DNS inverse, enregistrement PTR) affiché à côté des adresses dans le dashboard, via `GET /api/names`. Rien n'est résolu sur le chemin de la détection, et les alertes ne changent pas.
+- Construction de la requête et lecture de la réponse DNS sont des fonctions pures (testées sans réseau, réponses piégées comprises) ; seul l'échange UDP avec le serveur fait des I/O.
+- Cache borné (4 096 adresses), absences de nom comprises. Par défaut, seules les adresses internes sont résolues (voir `[names]`).
+
 **`anomaly/`** — Façade ③ (`Baseline`), Repository ⑨ (`Storage`)
 - Apprend le comportement normal de chaque machine interne avec un **Isolation Forest**, et ne fait rien entrer dans ce comportement sans validation humaine. Conception complète : [doc/conception-normalite.md](doc/conception-normalite.md).
 - `detect/anomaly.rs` (une stratégie ① de plus) résume le trafic de chaque machine par fenêtre ; `Baseline` enregistre ces échantillons, les fait juger par le modèle actif, gère le modèle candidat, son diff, les exceptions, les versions et le journal des décisions.
@@ -201,12 +207,13 @@ Les dépendances vont dans un seul sens : les **producteurs** d'alertes (`detect
 | `anomaly/` | `alert`, `config` | `detect`, `llm`, `web`, `logs` |
 | `logs.rs` | `alert`, `config`, `stats` | `llm`, `web`, `detect` |
 | `llm.rs` | `alert`, `config`, `stats` | `detect`, `logs`, `web` |
-| `web.rs` | `alert`, `anomaly`, `stats` | `detect`, `logs`, `llm` |
+| `web.rs` | `alert`, `anomaly`, `names`, `stats` | `detect`, `logs`, `llm` |
+| `names.rs` | `alert` (`host_part`), `config` | `detect`, `logs`, `llm`, `web` |
 | `main.rs` | tous | — |
 
 `main.rs` est la **racine de composition** : c'est le seul endroit qui crée les composants et les relie entre eux (canaux, `Arc` partagés). Changer de serveur LLM, ou désactiver le triage IA, ne demande donc aucune modification des détecteurs.
 
-Autre principe de découpage : **la logique de décision ne fait pas d'entrées/sorties**. `parse_packet`, `parse_dns_query`, les détecteurs, `LogAnalyzer::analyze`, `parse_analysis`, `banner::render`, ainsi que les caractéristiques, l'Isolation Forest et le diff de `anomaly/`, ne touchent ni au réseau, ni aux fichiers, ni au LLM. Ils se testent avec de simples valeurs en mémoire, et les I/O restent en bordure (sockets, sous-processus, HTTP).
+Autre principe de découpage : **la logique de décision ne fait pas d'entrées/sorties**. `parse_packet`, `parse_dns_query`, les détecteurs, `LogAnalyzer::analyze`, `parse_analysis`, `banner::render`, la lecture des réponses DNS de `names.rs`, ainsi que les caractéristiques, l'Isolation Forest et le diff de `anomaly/`, ne touchent ni au réseau, ni aux fichiers, ni au LLM. Ils se testent avec de simples valeurs en mémoire, et les I/O restent en bordure (sockets, sous-processus, HTTP).
 
 ### Design patterns utilisés
 
@@ -960,6 +967,18 @@ Apprentissage du comportement normal (section 3.9).
 | `listen` | `127.0.0.1:8080` | Adresse d'écoute du dashboard |
 | `token` | `""` | Jeton d'accès. Obligatoire si le dashboard est exposé, et pour toute action (répondre aux anomalies, valider un modèle) |
 
+### `[names]`
+
+Noms des machines affichés à côté des adresses, obtenus par DNS inverse (PTR). Sur un réseau domestique, c'est en général la box qui répond, avec le nom que chaque appareil lui a donné.
+
+| Clé | Défaut | Description |
+|---|---|---|
+| `enabled` | `true` | Afficher les noms des machines |
+| `external` | `false` | Résoudre aussi les adresses externes. Désactivé par défaut : la question PTR aboutit au serveur DNS du propriétaire de l'adresse, qui apprend ainsi qu'elle est examinée (un attaquant qui surveille sa zone serait prévenu) |
+| `nameserver` | `""` | Serveur DNS à interroger (adresse IP). Vide = premier `nameserver` de `/etc/resolv.conf` |
+| `timeout_ms` | `1000` | Délai maximal d'une résolution, en millisecondes |
+| `cache_secs` | `3600` | Durée de conservation d'un nom trouvé, en secondes (une absence de nom est gardée 5 minutes) |
+
 ---
 
 ## 8. Le dashboard et l'API
@@ -971,7 +990,8 @@ Ouvre `http://127.0.0.1:8080`, ou `http://hôte:8080/?token=…` si un jeton est
 - **Bandeau du haut** : interface écoutée et pastille « En direct », qui passe au rouge (« Déconnecté ») si la connexion à l'agent est perdue.
 - **Tuiles de statistiques** : débit en paquets par seconde avec sa courbe sur les deux dernières minutes, paquets capturés, volume, paquets perdus, lignes de logs lues, état du modèle et nombre d'analyses faites.
 - **Compteurs par sévérité** : nombre d'alertes et part du total ; cliquer sur l'un d'eux filtre la liste.
-- **Filtres** : recherche libre (IP, titre, type), source (réseau ou logs), verdict de l'IA.
+- **Noms des machines** : à côté de chaque adresse, le nom obtenu par DNS inverse (celui que la box donne à la machine), en pastille violette. Seules les adresses internes sont résolues par défaut (voir `[names]`).
+- **Filtres** : recherche libre (IP, nom de machine, titre, type), source (réseau ou logs), verdict de l'IA.
 - **Panneau « Comportement normal »** (si l'apprentissage est activé) : modèle actif ou progression de l'apprentissage (avec une barre d'avancement), fenêtres par statut, bouton « Lancer un apprentissage », retour à une version précédente. Quand un modèle candidat attend, son diff s'affiche machine par machine, avec « Accepter » ou « Refuser » pour chacune, « Tout accepter », « Tout refuser », et les machines peu actives repliées. Suivent les exceptions actives et les dernières décisions.
 - **Question « est-ce normal ? »** : dans le détail d'une anomalie, un motif, une portée, et les boutons « C'est normal » et « C'est suspect ». La réponse donnée s'affiche ensuite à la place.
 - **Liste des alertes** : mise à jour en direct, sans recharger la page. Le titre de la section indique combien d'alertes sont affichées. Une nouvelle alerte s'illumine brièvement. Le badge indique l'état du triage : en attente, verdict avec confiance, ou échec.
@@ -991,6 +1011,7 @@ Toutes les routes acceptent le jeton en `?token=` ou en `Authorization: Bearer �
 | `GET /api/alerts/{id}` | Une alerte |
 | `GET /api/stats` | `{ "stats": {...}, "alerts_by_severity": {...} }` |
 | `GET /api/events` | Flux SSE : `{"type":"new"\|"update","alert":{...}}` |
+| `GET /api/names?ips=192.168.1.20,192.168.1.10:22` | Noms des machines (DNS inverse) : `{"192.168.1.20": "pc-salon.lan"}`, seulement pour les adresses qui en ont un ; 64 valeurs au plus |
 | `GET /api/baseline` | État de l'apprentissage : mode, fenêtres par statut, modèle actif, candidat et son diff, versions, exceptions, décisions récentes (`{"enabled": false}` s'il est désactivé) |
 | `POST /api/alerts/{id}/feedback` | Réponse à une anomalie : `{"verdict": "normal"\|"suspect", "reason": "Sauvegarde", "scope": "once"\|"always"}` |
 | `POST /api/baseline/train` | Lance un apprentissage maintenant |

@@ -22,6 +22,7 @@ pub struct Config {
     pub detection: DetectionConfig,
     pub llm: LlmConfig,
     pub web: WebConfig,
+    pub names: NamesConfig,
 }
 
 impl Config {
@@ -402,5 +403,27 @@ impl Default for WebConfig {
     fn default() -> Self {
         // Localhost par défaut : le dashboard révèle la topologie du réseau.
         Self { listen: "127.0.0.1:8080".into(), token: String::new() }
+    }
+}
+
+/// Section `[names]` : noms des machines affichés à côté des adresses (DNS inverse, voir `names.rs`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct NamesConfig {
+    pub enabled: bool,
+    /// Résoudre aussi les adresses externes. Désactivé par défaut : la question aboutit au
+    /// serveur DNS du propriétaire de l'adresse, qui apprend ainsi qu'elle est examinée.
+    pub external: bool,
+    /// Serveur DNS à interroger (adresse IP). Vide = premier `nameserver` de /etc/resolv.conf.
+    pub nameserver: String,
+    /// Délai maximal d'une résolution, en millisecondes.
+    pub timeout_ms: u64,
+    /// Durée de conservation d'un nom trouvé, en secondes.
+    pub cache_secs: u64,
+}
+
+impl Default for NamesConfig {
+    fn default() -> Self {
+        Self { enabled: true, external: false, nameserver: String::new(), timeout_ms: 1000, cache_secs: 3600 }
     }
 }

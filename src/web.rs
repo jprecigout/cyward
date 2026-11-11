@@ -8,6 +8,7 @@
 //! | `GET /api/stats`                    | Compteurs et nombre d'alertes par sévérité           |
 //! | `GET /api/events`                   | Flux Server-Sent Events des créations et mises à jour |
 //! | `GET /api/baseline`                 | État de l'apprentissage du comportement normal       |
+//! | `GET /api/names?ips=a,b`            | Noms des machines (DNS inverse) des adresses données |
 //! | `POST /api/alerts/{id}/feedback`    | Réponse « est-ce normal ? » à une anomalie           |
 //! | `POST /api/baseline/train`          | Lance un apprentissage                               |
 //! | `POST /api/baseline/decision`       | Valide le diff d'un modèle candidat                  |
@@ -39,6 +40,7 @@ use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use crate::{
     alert::{AlertKind, AlertSink, Feedback, FeedbackScope, FeedbackVerdict},
     anomaly::{baseline::Baseline, trainer},
+    names::{self, Resolver},
     stats::Stats,
 };
 
@@ -56,11 +58,13 @@ struct AppState {
     token: Arc<String>,
     /// Apprentissage du comportement normal, s'il est activé.
     baseline: Option<Arc<Baseline>>,
+    /// Noms des machines affichés à côté des adresses.
+    names: Arc<Resolver>,
 }
 
 /// Démarre le serveur et ne rend la main qu'en cas d'erreur.
-pub async fn serve(listen: &str, token: String, sink: AlertSink, stats: Arc<Stats>, baseline: Option<Arc<Baseline>>) -> Result<()> {
-    let state = AppState { sink, stats, token: Arc::new(token), baseline };
+pub async fn serve(listen: &str, token: String, sink: AlertSink, stats: Arc<Stats>, baseline: Option<Arc<Baseline>>, names: Arc<Resolver>) -> Result<()> {
+    let state = AppState { sink, stats, token: Arc::new(token), baseline, names };
     // Routes d'écriture : un second middleware, appliqué à elles seules, exige le jeton en en-tête.
     let writes = Router::new()
         .route("/api/alerts/{id}/feedback", post(feedback))
@@ -75,6 +79,7 @@ pub async fn serve(listen: &str, token: String, sink: AlertSink, stats: Arc<Stat
         .route("/api/stats", get(get_stats))
         .route("/api/events", get(events))
         .route("/api/baseline", get(baseline_status))
+        .route("/api/names", get(get_names))
         .merge(writes)
         // Le middleware d'authentification s'applique à toutes les routes ci-dessus.
         .layer(middleware::from_fn_with_state(state.clone(), auth))
@@ -166,6 +171,20 @@ async fn events(State(s): State<AppState>) -> Sse<impl Stream<Item = Result<Even
     let stream = BroadcastStream::new(s.sink.store.subscribe()).filter_map(|r| r.ok().and_then(|e| Event::default().json_data(e).ok()).map(Ok));
     // Le keep-alive envoie un commentaire périodique pour que les proxys ne coupent pas la connexion.
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Paramètres de `GET /api/names` : valeurs `src`/`dst` séparées par des virgules.
+#[derive(Deserialize)]
+struct NamesQuery {
+    #[serde(default)]
+    ips: String,
+}
+
+/// Noms des machines : `{"192.168.1.20:443": "pc-salon.lan"}`, seulement pour les valeurs qui
+/// en ont un. Au plus `names::MAX_BATCH` valeurs par requête, le reste est ignoré.
+async fn get_names(State(s): State<AppState>, Query(q): Query<NamesQuery>) -> impl IntoResponse {
+    let values: Vec<String> = q.ips.split(',').map(str::trim).filter(|v| !v.is_empty()).take(names::MAX_BATCH).map(String::from).collect();
+    Json(s.names.names(&values).await)
 }
 
 /// Réponse des routes d'apprentissage quand la fonctionnalité est désactivée.
