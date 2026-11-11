@@ -26,6 +26,19 @@ Toute modification de code doit être **commentée** et **testée**. Une modific
 - toute modification de la détection se vérifie aussi par le rejeu de `examples/gen_attacks.rs`, qui doit toujours donner 6 alertes. Si un nouveau détecteur est ajouté, ajouter son scénario au générateur et mettre à jour le nombre attendu ici et dans le README ;
 - toute modification du dashboard se vérifie dans un navigateur, après recompilation (la page est embarquée dans le binaire).
 
+## Skills du projet
+
+Dans `.claude/skills/`, à utiliser plutôt que de réinventer la démarche :
+
+| Skill | Rôle |
+|---|---|
+| `/verifier` | Vérification complète avant de déclarer un travail fini : en-têtes `//!`, build, clippy `-D warnings`, tests, rejeu exigeant exactement les alertes attendues (`check.sh`, `--docker` en option) |
+| `/nouveau-detecteur` | Ajout d'un détecteur réseau : règles du chemin critique, étapes (config, `AlertKind`, `Engine`, tests, scénario, docs), modèle de code testé |
+| `/nouvelle-regle-log` | Ajout d'une règle sur les logs : choix entre règle de config et règle en Rust, tests sur de vraies lignes |
+| `/revue` | Revue de code senior avec la grille propre à Cyward (temps des paquets, seuils `==`, mémoire bornée, sécurité du dashboard et du LLM) |
+
+Le nombre d'alertes attendues au rejeu est défini par `EXPECTED_TITLES` dans `.claude/skills/verifier/check.sh` : le mettre à jour quand un scénario est ajouté à `examples/gen_attacks.rs`.
+
 ## Commandes
 
 ```bash
