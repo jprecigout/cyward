@@ -20,6 +20,12 @@ use crate::{
     config::{BruteForceConfig, DetectionConfig, PortScanConfig, SynFloodConfig},
 };
 
+/// Couples (hôte, port) mémorisés au plus par `PortScan`, toutes sources confondues : environ
+/// 50 Mo. Sans ce plafond, des SYN aux adresses source usurpées rempliraient la mémoire.
+const MAX_SCAN_ENTRIES: usize = 1_000_000;
+/// Triplets (source, cible, port) suivis au plus par `BruteForce` (même raison).
+const MAX_BRUTEFORCE_COUNTERS: usize = 100_000;
+
 /// Scan vertical (beaucoup de ports sur un hôte) et balayage horizontal (un port sur beaucoup d'hôtes).
 pub struct PortScan {
     cfg: PortScanConfig,
@@ -27,6 +33,11 @@ pub struct PortScan {
     net: DetectionConfig,
     /// État par adresse source.
     sources: HashMap<IpAddr, ScanState>,
+    /// Éléments mémorisés dans tous les `ScanState` (ports par hôte + hôtes par port).
+    entries: usize,
+    /// Plafond de `entries` ([`MAX_SCAN_ENTRIES`], réduit dans les tests). Une fois atteint,
+    /// les sources déjà suivies continuent de l'être, mais rien de nouveau n'est mémorisé.
+    max_entries: usize,
 }
 
 /// Ce qu'une source a sondé depuis le début de sa fenêtre.
@@ -36,12 +47,27 @@ struct ScanState {
     ports_by_host: HashMap<IpAddr, HashSet<u16>>,
     /// Pour chaque port visé : les hôtes distincts essayés.
     hosts_by_port: HashMap<u16, HashSet<IpAddr>>,
+    /// Éléments mémorisés par cette source (sa part de `PortScan::entries`).
+    entries: usize,
 }
 
 impl PortScan {
     pub fn new(cfg: PortScanConfig, net: DetectionConfig) -> Self {
-        Self { cfg, net, sources: HashMap::new() }
+        Self { cfg, net, sources: HashMap::new(), entries: 0, max_entries: MAX_SCAN_ENTRIES }
     }
+}
+
+/// Ajoute `item` à l'ensemble de `key`, tant que l'ensemble n'a pas atteint `threshold` (au-delà,
+/// l'alerte est déjà émise : mémoriser davantage ne sert à rien). Un ensemble nouveau n'est
+/// créé que si `room` (budget mémoire disponible). Renvoie la taille de l'ensemble si `item`
+/// était nouveau.
+fn insert_capped<K: std::hash::Hash + Eq, V: std::hash::Hash + Eq>(map: &mut HashMap<K, HashSet<V>>, key: K, item: V, threshold: usize, room: bool) -> Option<usize> {
+    let set = match map.get_mut(&key) {
+        Some(s) => s,
+        None if room => map.entry(key).or_default(),
+        None => return None,
+    };
+    (set.len() < threshold && set.insert(item)).then_some(set.len())
 }
 
 impl Detector for PortScan {
@@ -50,16 +76,23 @@ impl Detector for PortScan {
         if p.proto != Proto::Tcp || !p.tcp.is_connection_start() {
             return;
         }
+        let room = self.entries < self.max_entries;
+        if !room && !self.sources.contains_key(&p.src) {
+            return;
+        }
         let st = self.sources.entry(p.src).or_insert_with(|| ScanState {
             start: p.ts,
             ports_by_host: HashMap::new(),
             hosts_by_port: HashMap::new(),
+            entries: 0,
         });
         // Fenêtre expirée : on repart de zéro.
         if p.ts - st.start > self.cfg.window_secs {
             st.start = p.ts;
             st.ports_by_host.clear();
             st.hosts_by_port.clear();
+            self.entries -= st.entries;
+            st.entries = 0;
         }
 
         // Un scan depuis l'intérieur du réseau est bien plus inquiétant : une machine
@@ -68,18 +101,23 @@ impl Detector for PortScan {
         let severity = if lateral { Severity::High } else { Severity::Medium };
         let origin = if lateral { "un hôte interne (possible mouvement latéral)" } else { "une adresse externe" };
 
-        // Scan vertical. `insert` renvoie vrai si le port est nouveau : un même port répété
-        // ne fait pas grossir le compteur.
-        let ports = st.ports_by_host.entry(p.dst).or_default();
-        if ports.insert(p.dport) && ports.len() == self.cfg.ports_threshold {
+        // Scan vertical. Seul un port nouveau fait grossir le compteur : un même port répété
+        // ne compte qu'une fois.
+        let new_port = insert_capped(&mut st.ports_by_host, p.dst, p.dport, self.cfg.ports_threshold, room);
+        let new_host = insert_capped(&mut st.hosts_by_port, p.dport, p.dst, self.cfg.hosts_threshold, room);
+        let added = usize::from(new_port.is_some()) + usize::from(new_host.is_some());
+        st.entries += added;
+        self.entries += added;
+
+        if new_port == Some(self.cfg.ports_threshold) {
             // Ports triés dans les preuves, pour une lecture plus facile.
-            let mut sample: Vec<_> = ports.iter().copied().collect();
+            let mut sample: Vec<_> = st.ports_by_host[&p.dst].iter().copied().collect();
             sample.sort_unstable();
             out.push(
                 Alert::new(AlertKind::PortScan, severity, AlertSource::Network, ts_to_dt(p.ts), format!("Scan de ports de {} vers {}", p.src, p.dst))
                     .description(format!(
                         "{} ports distincts sondés en moins de {} s depuis {origin}.",
-                        ports.len(),
+                        self.cfg.ports_threshold,
                         self.cfg.window_secs
                     ))
                     .src(p.src)
@@ -89,14 +127,13 @@ impl Detector for PortScan {
         }
 
         // Balayage horizontal : même principe, par port.
-        let hosts = st.hosts_by_port.entry(p.dport).or_default();
-        if hosts.insert(p.dst) && hosts.len() == self.cfg.hosts_threshold {
-            let sample: Vec<_> = hosts.iter().take(30).map(|h| h.to_string()).collect();
+        if new_host == Some(self.cfg.hosts_threshold) {
+            let sample: Vec<_> = st.hosts_by_port[&p.dport].iter().take(30).map(|h| h.to_string()).collect();
             out.push(
                 Alert::new(AlertKind::HostSweep, severity, AlertSource::Network, ts_to_dt(p.ts), format!("Balayage du port {} par {}", p.dport, p.src))
                     .description(format!(
                         "{} hôtes distincts contactés sur le port {} en moins de {} s depuis {origin}.",
-                        hosts.len(),
+                        self.cfg.hosts_threshold,
                         p.dport,
                         self.cfg.window_secs
                     ))
@@ -111,7 +148,14 @@ impl Detector for PortScan {
     fn tick(&mut self, now: f64, _out: &mut Vec<Alert>) {
         // Oublie les sources inactives depuis deux fenêtres, pour borner la mémoire.
         let w = self.cfg.window_secs;
-        self.sources.retain(|_, s| now - s.start <= 2.0 * w);
+        let entries = &mut self.entries;
+        self.sources.retain(|_, s| {
+            let keep = now - s.start <= 2.0 * w;
+            if !keep {
+                *entries -= s.entries;
+            }
+            keep
+        });
     }
 }
 
@@ -122,12 +166,15 @@ pub struct BruteForce {
     ports: HashSet<u16>,
     /// (source, destination, port) → (début de fenêtre, nombre de connexions).
     counters: HashMap<(IpAddr, IpAddr, u16), (f64, usize)>,
+    /// Plafond de `counters` ([`MAX_BRUTEFORCE_COUNTERS`], réduit dans les tests) : au-delà,
+    /// les triplets déjà suivis continuent d'être comptés, aucun nouveau n'est créé.
+    max_counters: usize,
 }
 
 impl BruteForce {
     pub fn new(cfg: BruteForceConfig) -> Self {
         let ports = cfg.ports.iter().copied().collect();
-        Self { cfg, ports, counters: HashMap::new() }
+        Self { cfg, ports, counters: HashMap::new(), max_counters: MAX_BRUTEFORCE_COUNTERS }
     }
 }
 
@@ -138,7 +185,11 @@ impl Detector for BruteForce {
         }
         // Chaque essai de mot de passe ouvre en général une nouvelle connexion : compter les
         // SYN suffit, même si le protocole est chiffré.
-        let (start, count) = self.counters.entry((p.src, p.dst, p.dport)).or_insert((p.ts, 0));
+        let key = (p.src, p.dst, p.dport);
+        if self.counters.len() >= self.max_counters && !self.counters.contains_key(&key) {
+            return;
+        }
+        let (start, count) = self.counters.entry(key).or_insert((p.ts, 0));
         if p.ts - *start > self.cfg.window_secs {
             *start = p.ts;
             *count = 0;
@@ -296,5 +347,56 @@ mod tests {
         }
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, AlertKind::BruteForce);
+    }
+
+    // Des SYN aux sources usurpées saturent le budget mémoire sans le dépasser ; un scanner
+    // déjà suivi reste détecté, et le budget se libère quand les sources expirent.
+    #[test]
+    fn portscan_memory_is_bounded() {
+        let mut d = PortScan::new(PortScanConfig::default(), DetectionConfig::default());
+        d.max_entries = 100;
+        let mut out = Vec::new();
+        d.on_packet(&syn(0.0, "192.168.1.50", "192.168.1.1", 1), &mut out);
+        for i in 0..1000u32 {
+            d.on_packet(&syn(0.1, &format!("198.51.{}.{}", i / 256, i % 256), "192.168.1.1", 80), &mut out);
+        }
+        assert!(d.entries <= d.max_entries + 1, "{}", d.entries);
+        assert!(d.sources.len() <= d.max_entries);
+        for port in 2..=100 {
+            d.on_packet(&syn(1.0 + f64::from(port) * 0.01, "192.168.1.50", "192.168.1.1", port), &mut out);
+        }
+        assert!(out.iter().any(|a| a.kind == AlertKind::PortScan), "scanner suivi non détecté");
+        d.tick(1000.0, &mut out);
+        assert_eq!((d.entries, d.sources.len()), (0, 0));
+    }
+
+    // Une source qui dépasse largement le seuil ne mémorise pas plus que le seuil.
+    #[test]
+    fn portscan_stops_growing_at_threshold() {
+        let mut d = PortScan::new(PortScanConfig::default(), DetectionConfig::default());
+        let mut out = Vec::new();
+        for port in 1..=5000 {
+            d.on_packet(&syn(f64::from(port) * 0.001, "192.168.1.50", "192.168.1.1", port), &mut out);
+        }
+        assert_eq!(out.len(), 1);
+        assert_eq!(d.sources[&"192.168.1.50".parse::<IpAddr>().unwrap()].ports_by_host.values().next().unwrap().len(), PortScanConfig::default().ports_threshold);
+    }
+
+    // Au-delà du plafond, aucun nouveau triplet n'est créé, mais la force brute déjà suivie
+    // est toujours détectée.
+    #[test]
+    fn bruteforce_counters_are_bounded() {
+        let mut d = BruteForce::new(BruteForceConfig::default());
+        d.max_counters = 10;
+        let mut out = Vec::new();
+        d.on_packet(&syn(0.0, "198.51.100.7", "192.168.1.10", 22), &mut out);
+        for i in 0..100u32 {
+            d.on_packet(&syn(0.1, &format!("203.0.113.{i}"), "192.168.1.10", 22), &mut out);
+        }
+        assert_eq!(d.counters.len(), 10);
+        for i in 1..50 {
+            d.on_packet(&syn(f64::from(i), "198.51.100.7", "192.168.1.10", 22), &mut out);
+        }
+        assert_eq!(out.len(), 1);
     }
 }

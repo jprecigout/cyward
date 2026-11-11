@@ -452,6 +452,7 @@ Chaque seuil cité est modifiable dans la configuration (section 7).
 - Pour chaque IP source, il tient une fenêtre de `window_secs` (60 s) contenant :
   - les **ports distincts** visés sur chaque hôte : au-delà de `ports_threshold` (25), c'est un **scan vertical** (`port_scan`) ;
   - les **hôtes distincts** visés sur chaque port : au-delà de `hosts_threshold` (20), c'est un **balayage horizontal** (`host_sweep`), typique d'un ver ou de la recherche de SMB ouverts.
+- **Mémoire bornée** : un ensemble cesse de grossir une fois son seuil atteint (l'alerte est émise), et le détecteur mémorise au plus 1 000 000 de couples (hôte, port), environ 50 Mo, toutes sources confondues. Des SYN aux adresses usurpées ne peuvent donc pas remplir la mémoire. Une fois le plafond atteint, les sources déjà suivies le restent.
 
 **Sévérité :**
 - **Haute** si la source est interne : une machine de ton réseau qui en scanne d'autres est un signe classique de **mouvement latéral** après une compromission.
@@ -467,6 +468,7 @@ Chaque seuil cité est modifiable dans la configuration (section 7).
 - Le détecteur compte les nouvelles connexions TCP par triplet (source, destination, port), pour les ports listés dans `bruteforce.ports` : SSH, RDP, SMB, FTP, Telnet, SMTP, IMAP, POP3, MySQL, PostgreSQL, MSSQL, VNC, Redis.
 - Au-delà de `threshold` (20) connexions en `window_secs` (60 s), il lève une alerte **haute**.
 - Il fonctionne même si le service est chiffré : seul le rythme des connexions compte.
+- **Mémoire bornée** : 100 000 triplets suivis au plus. Au-delà, les triplets déjà suivis restent comptés, aucun nouveau n'est créé.
 
 **MITRE :** T1110 (Brute Force).
 
@@ -1108,9 +1110,9 @@ Avec `AmbientCapabilities`, le `setcap` sur le binaire n'est pas nécessaire.
 cargo test
 ```
 
-68 tests couvrent :
+71 tests couvrent :
 - le parsing des paquets et du DNS ;
-- chaque détecteur, cas positifs et négatifs (un scan lent ou un trafic irrégulier ne doivent pas déclencher) ;
+- chaque détecteur, cas positifs et négatifs (un scan lent ou un trafic irrégulier ne doivent pas déclencher), et le plafond mémoire des détecteurs exposés aux adresses usurpées ;
 - les règles de logs ;
 - la fusion des alertes ;
 - l'extraction du JSON renvoyé par le modèle ;

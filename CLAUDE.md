@@ -157,7 +157,7 @@ Points qui demandent de lire plusieurs fichiers pour être compris :
   - Tant que le serveur est hors ligne, les alertes restent `Pending` ; elles ne sont pas marquées en échec.
   - Le prompt inclut jusqu'à 8 alertes récentes impliquant les mêmes hôtes, comparées sans le port grâce à `host_part`.
   - `parse_analysis` est volontairement tolérant : il extrait le JSON entouré de texte, accepte une confiance en `"85%"` et un champ `mitre` en chaîne simple.
-- **Mémoire bornée.** Tout l'état des détecteurs est en `HashMap` purgées dans `tick`, avec des plafonds (`MAX_TRACKED` dans beacon, 10 000 sources dans synflood, purge des échecs dans logs). L'`AlertStore` garde 5 000 alertes. Tout nouvel état doit avoir sa purge.
+- **Mémoire bornée.** Tout l'état des détecteurs est en `HashMap` purgées dans `tick`, avec des plafonds (`MAX_TRACKED` dans beacon, `MAX_SCAN_ENTRIES` et `MAX_BRUTEFORCE_COUNTERS` dans scan, 10 000 sources dans synflood, purge des échecs dans logs). Un plafond se rend testable par un champ (`max_entries`, `max_counters`) initialisé à la constante et réduit dans les tests. L'`AlertStore` garde 5 000 alertes. Tout nouvel état doit avoir sa purge.
 - **Interne / externe.** `DetectionConfig::is_local` (basé sur `local_networks`) détermine :
   - la sévérité des scans (source interne = mouvement latéral = High) ;
   - les flux suivis par `Beaconing` et `Volume` (interne → externe uniquement).
