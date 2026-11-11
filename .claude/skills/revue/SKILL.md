@@ -16,6 +16,17 @@ Lire chaque fichier modifié **en entier**, ainsi que les appelants des fonction
 
 ## 2. Grille de revue
 
+### Structure et conception (voir CLAUDE.md, « Structure et design patterns »)
+- Chaque module garde une seule responsabilité. Le sens des dépendances correspond au tableau de CLAUDE.md : les producteurs d'alertes (`detect/`, `logs.rs`) n'importent jamais `llm` ni `web`, et inversement. Pour le contrôler :
+  ```bash
+  for f in src/detect/*.rs src/logs.rs src/llm.rs src/web.rs; do printf '%-22s ' $f; grep -v '^\s*//' $f | grep -oE '\b(alert|capture|config|stats|llm|web|logs|banner)::' | sort -u | tr '\n' ' '; echo; done
+  ```
+- La logique de décision reste pure (sans I/O), donc testable ; les I/O restent en bordure.
+- Le changement réutilise les patterns en place (Strategy `Detector`, Builder `Alert`, façade `AlertSink`, Observer `broadcast`, pipeline par canaux, middleware, superviseur) plutôt qu'une mécanique parallèle.
+- Une nouvelle détection est une nouvelle implémentation enregistrée, pas une série de cas ajoutés dans du code existant.
+- Pas d'état global ni de singleton ; des enums plutôt que des chaînes ou des booléens magiques ; des fonctions courtes.
+- Signaler aussi l'excès inverse : une abstraction sans second usage, une couche « au cas où », un pattern objet transposé qui complique le code Rust.
+
 ### Justesse de la détection
 - Les détecteurs utilisent-ils uniquement le temps des paquets (`p.ts`, `now` de `tick`) ? Un `SystemTime::now()` dans `src/detect/` casse le rejeu.
 - Les seuils sont-ils testés avec `==`, pour une seule alerte par fenêtre ? Avec `>=`, il y a une alerte par paquet.
@@ -50,6 +61,8 @@ Lire chaque fichier modifié **en entier**, ainsi que les appelants des fonction
 - Piège clap : un `///` sur `Cli`/`Command` apparaît dans `--help`.
 
 ### Documentation
+- README section 2 : l'arborescence, les composants, le tableau des dépendances entre modules et celui des design patterns reflètent-ils le code après la modification ? Un nouveau fichier, une nouvelle dépendance ou un nouveau pattern sans mise à jour de cette section est **bloquant** (règle de CLAUDE.md).
+- Le tableau des dépendances de CLAUDE.md est-il cohérent avec celui du README (mêmes modules, mêmes dépendances) ?
 - README (sections 3, 7, 8, 11), `config.example.toml` et CLAUDE.md sont-ils à jour (nouveaux détecteurs, clés de configuration, types d'alerte, nombre d'alertes du rejeu) ?
 
 ## 3. Vérifier, puis rapporter

@@ -8,9 +8,46 @@ Cyward est un agent de détection d'intrusions en Rust (Linux). Il capture le tr
 
 Les commentaires, messages de log, textes d'alerte, prompts du LLM et l'interface du dashboard sont **en français** : garder cette langue.
 
-## Règles obligatoires : code commenté et testé
+## Règles obligatoires : code bien structuré, commenté et testé
 
-Toute modification de code doit être **commentée** et **testée**. Une modification qui ne respecte pas ces deux règles n'est pas terminée.
+Toute modification de code doit être **bien structurée**, **commentée** et **testée**. Une modification qui ne respecte pas ces trois règles n'est pas terminée.
+
+**Structure et design patterns :**
+- **Une responsabilité par module**, et des dépendances qui vont dans un seul sens. État actuel, à préserver :
+
+  | Module | Dépend de |
+  |---|---|
+  | `detect/` | `alert`, `capture` (`PacketMeta`), `config` |
+  | `logs.rs` | `alert`, `config`, `stats` |
+  | `llm.rs` | `alert`, `config`, `stats` |
+  | `web.rs` | `alert`, `stats` |
+
+  Les producteurs d'alertes (`detect/`, `logs.rs`) ne dépendent jamais des consommateurs (`llm`, `web`), et inversement. Seul `main.rs` assemble le tout (racine de composition).
+- **Logique pure séparée des entrées/sorties** : le parsing et la décision (`parse_packet`, `parse_dns_query`, `LogAnalyzer::analyze`, `parse_analysis`, les détecteurs) ne font aucune I/O. C'est ce qui les rend testables sans réseau, sans fichier, sans LLM. Les I/O (sockets, sous-processus, HTTP) restent en bordure.
+- **Favoriser les design patterns déjà en place**, et en réutiliser un plutôt que d'inventer une nouvelle mécanique :
+
+  | Pattern | Où | À réutiliser pour |
+  |---|---|---|
+  | Strategy (trait + objets `Box<dyn …>`) | `trait Detector`, `Engine` | Tout nouveau détecteur ou analyseur interchangeable |
+  | Builder | `Alert::new(...).src(...).dst(...).evidence(...)` | Construire des objets à nombreux champs optionnels |
+  | Façade / point d'entrée unique | `AlertSink::emit` | Tout ce qui produit des alertes : ne jamais écrire directement dans le store ou la file LLM |
+  | Observer (publication/abonnement) | `AlertStore` + `broadcast` → clients SSE | Diffuser des événements à plusieurs consommateurs |
+  | Producteur/consommateur (pipeline par canaux) | capture → moteur, sources de logs → analyseur, sink → LLM | Découpler un producteur rapide d'un consommateur lent (canal borné, `try_send` si le producteur ne doit pas bloquer) |
+  | Middleware (chaîne de responsabilité) | authentification axum (`web.rs`) | Comportements transverses du serveur web |
+  | Superviseur | `logs::supervise` | Tâche externe à relancer après une panne |
+
+- **Ouvert à l'extension, fermé à la modification** : une nouvelle détection s'ajoute en écrivant une nouvelle implémentation et en l'enregistrant (`Engine::new`), pas en ajoutant des cas dans le code existant.
+- **Les types plutôt que des valeurs brutes** : des enums (`Severity`, `AlertKind`, `TriageStatus`, `Proto`) plutôt que des chaînes ou des booléens ; une struct de configuration avec `#[serde(default)]` et `impl Default` par sous-système.
+- **Pas d'état global** (ni `static mut`, ni singleton) : l'état partagé passe explicitement en `Arc`, avec des atomiques pour les compteurs et un `Mutex` court pour le reste.
+- **Fonctions courtes**, qui font une seule chose et dont le nom le dit ; découper dès qu'une fonction mélange décision et I/O, ou dépasse un écran.
+- **Patterns au service de la simplicité** : un pattern se justifie par un besoin réel (plusieurs implémentations, découplage, testabilité). Pas d'abstraction pour une seule implémentation sans besoin prévisible, pas de couche « au cas où ». Préférer les idiomes Rust (traits, enums + `match`, itérateurs, `?`) aux patterns orientés objet transposés tels quels (pas d'émulation d'héritage, pas d'accesseurs inutiles).
+
+**README toujours à jour (obligatoire)** : la section 2 « Architecture du code » du README est la référence de la structure du projet. Toute modification qui ajoute, change ou retire l'un des éléments suivants met à jour cette section **dans la même modification** :
+- un fichier ou un dossier → l'arborescence et « Les composants » ;
+- une dépendance entre modules → le tableau « Dépendances entre modules » (et celui de CLAUDE.md ci-dessus, qui doit rester cohérent avec lui) ;
+- un design pattern, ou un nouvel usage d'un pattern existant → le tableau « Design patterns utilisés » : le pattern, l'endroit du code et le problème qu'il résout dans Cyward.
+
+Le reste du README suit la même règle : détecteurs (section 3), configuration (section 7), API et types d'alerte (section 8), résultat du rejeu (section 11). Une modification dont le README n'est pas à jour n'est pas terminée.
 
 **Commentaires** (en français), au niveau de densité du code existant :
 - un en-tête `//!` par module, qui explique son rôle et sa place dans le pipeline ;
@@ -35,7 +72,7 @@ Dans `.claude/skills/`, à utiliser plutôt que de réinventer la démarche :
 | `/verifier` | Vérification complète avant de déclarer un travail fini : en-têtes `//!`, build, clippy `-D warnings`, tests, rejeu exigeant exactement les alertes attendues (`check.sh`, `--docker` en option) |
 | `/nouveau-detecteur` | Ajout d'un détecteur réseau : règles du chemin critique, étapes (config, `AlertKind`, `Engine`, tests, scénario, docs), modèle de code testé |
 | `/nouvelle-regle-log` | Ajout d'une règle sur les logs : choix entre règle de config et règle en Rust, tests sur de vraies lignes |
-| `/revue` | Revue de code senior avec la grille propre à Cyward (temps des paquets, seuils `==`, mémoire bornée, sécurité du dashboard et du LLM) |
+| `/revue` | Revue de code senior avec la grille propre à Cyward (structure et design patterns, temps des paquets, seuils `==`, mémoire bornée, sécurité du dashboard et du LLM) |
 
 Le nombre d'alertes attendues au rejeu est défini par `EXPECTED_TITLES` dans `.claude/skills/verifier/check.sh` : le mettre à jour quand un scénario est ajouté à `examples/gen_attacks.rs`.
 

@@ -78,35 +78,48 @@ Le système fonctionne en deux étages.
 cyward/
 ├── Cargo.toml
 ├── config.example.toml        # configuration commentée, toutes valeurs par défaut
+├── Dockerfile, compose.yaml   # image et déploiement Docker
+├── docker/cyward.toml         # configuration utilisée par l'image Docker
+├── LICENSE                    # Apache 2.0
+├── CLAUDE.md                  # règles du projet pour Claude Code
+├── .claude/skills/            # skills : verifier, nouveau-detecteur, nouvelle-regle-log, revue
 ├── assets/
-│   └── index.html             # dashboard (embarqué dans le binaire à la compilation)
+│   ├── index.html             # dashboard (embarqué dans le binaire à la compilation)
+│   └── logo.svg, logo-wordmark.svg, favicon.svg
 ├── examples/
 │   └── gen_attacks.rs         # générateur de pcap d'attaques simulées
 └── src/
-    ├── main.rs                # CLI, assemblage des tâches, boucle du moteur
+    ├── main.rs                # CLI, assemblage des tâches, boucle du moteur   ⑤ ⑧
+    ├── banner.rs              # bannière de démarrage (logo, version, résumé de la config)
     ├── config.rs              # structures de configuration (TOML + valeurs par défaut)
-    ├── alert.rs               # modèle d'alerte, AlertStore, AlertSink
+    ├── alert.rs               # modèle d'alerte, AlertStore, AlertSink         ② ③ ④
     ├── stats.rs               # compteurs exposés au dashboard
-    ├── capture.rs             # capture live, rejeu pcap, parsing des paquets et du DNS
+    ├── capture.rs             # capture live, rejeu pcap, parsing des paquets  ⑤
     ├── detect/
-    │   ├── mod.rs             # trait Detector et moteur
-    │   ├── scan.rs            # scan de ports, balayage, force brute réseau, inondation SYN
-    │   ├── beacon.rs          # balises périodiques (C2)
-    │   ├── volume.rs          # volume sortant anormal (exfiltration)
-    │   └── dns.rs             # DNS à forte entropie, tunnel DNS
-    ├── logs.rs                # sources de logs et règles d'analyse
-    ├── llm.rs                 # client du modèle, prompt, parsing de la réponse
-    └── web.rs                 # serveur HTTP, API JSON, flux SSE, authentification
+    │   ├── mod.rs             # trait Detector et moteur                       ①
+    │   ├── scan.rs            # scan, balayage, force brute, inondation SYN    ①
+    │   ├── beacon.rs          # balises périodiques (C2)                       ①
+    │   ├── volume.rs          # volume sortant anormal (exfiltration)          ①
+    │   └── dns.rs             # DNS à forte entropie, tunnel DNS               ①
+    ├── logs.rs                # sources de logs et règles d'analyse            ⑤ ⑦
+    ├── llm.rs                 # client du modèle, prompt, décodage du verdict  ⑤
+    └── web.rs                 # serveur HTTP, API JSON, flux SSE               ④ ⑥
 ```
+
+Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-utilisés) mis en œuvre dans le fichier.
 
 ### Les composants
 
-**`capture.rs`**
+**`main.rs`** — racine de composition ⑧, consommateur du pipeline ⑤
+- Lit la ligne de commande et la configuration, crée les composants et les relie (canaux, `Arc` partagés).
+- `run_engine` consomme les paquets et transmet les alertes produites à l'`AlertSink`.
+
+**`capture.rs`** — producteur du pipeline ⑤
 - **Capture live** : utilise `pnet_datalink`, qui ouvre une socket `AF_PACKET`. Cette crate est en pur Rust, sans dépendance à libpcap. La lecture tourne dans un thread dédié et envoie des `PacketMeta` au moteur par un canal borné (`capture.queue_size`). Si le moteur ne suit pas, les paquets sont abandonnés plutôt que de bloquer la capture, et le compteur « Perdus » augmente.
 - **Rejeu** : lit un fichier pcap classique avec `pcap-file`. Les types de lien gérés sont Ethernet, Linux SLL (`tcpdump -i any`) et IP brut.
 - **Parsing** : assuré par `etherparse` ; la question DNS est extraite à la main.
 
-**`detect/`**
+**`detect/`** — Strategy ①
 - Chaque détecteur implémente :
   ```rust
   trait Detector {
@@ -118,22 +131,251 @@ cyward/
 - `tick` sert à clore des fenêtres de temps et à purger l'état ancien, ce qui borne la mémoire.
 - Les IP de la `whitelist` sont ignorées en tant que source.
 
-**`logs.rs`**
+**`logs.rs`** — producteur/consommateur ⑤, superviseur ⑦
 - Lance `journalctl -f -o json` et/ou `tail -F` sur les fichiers configurés, et relance la commande si elle s'arrête.
 - Le `LogAnalyzer` applique des expressions régulières et garde, par IP, l'historique des échecs d'authentification.
 
-**`alert.rs`**
+**`alert.rs`** — Builder ② (`Alert`), Façade ③ (`AlertSink`), Observer ④ (`AlertStore`)
 - **`AlertSink`** est le point d'entrée unique des détecteurs. Il enregistre l'alerte et l'envoie en triage IA si sa sévérité le justifie.
 - **`AlertStore`** garde les 5 000 dernières alertes en mémoire.
 - Il **dédoublonne** les alertes selon une empreinte (type + source + cible). Une alerte identique pendant `alert_cooldown_secs` incrémente le compteur `count` de l'alerte existante au lieu d'en créer une nouvelle.
 - Chaque création ou mise à jour est diffusée aux navigateurs connectés.
 
-**`llm.rs`**
+**`llm.rs`** — consommateur du pipeline ⑤
 - Une tâche de fond vérifie toutes les 30 s que le serveur répond et que le modèle est installé.
 - Une autre tâche consomme la file de triage, une alerte à la fois.
 
-**`web.rs`**
+**`web.rs`** — observateur ④ (flux SSE), Middleware ⑥
 - Serveur `axum`. Il sert le dashboard, une API JSON et un flux Server-Sent Events pour les mises à jour en direct.
+
+**`banner.rs`**
+- Construit la bannière affichée au démarrage. La fonction de rendu est pure (elle renvoie une chaîne) ; seul `main.rs` l'affiche, avec ou sans couleurs selon le terminal.
+
+### Dépendances entre modules
+
+Les dépendances vont dans un seul sens : les **producteurs** d'alertes (`detect/`, `logs.rs`) ne connaissent pas les **consommateurs** (`llm.rs`, `web.rs`), et inversement. Tous se rejoignent sur `alert.rs`.
+
+| Module | Dépend de | Ne doit jamais dépendre de |
+|---|---|---|
+| `detect/` | `alert`, `capture` (`PacketMeta`), `config` | `llm`, `web`, `logs` |
+| `logs.rs` | `alert`, `config`, `stats` | `llm`, `web`, `detect` |
+| `llm.rs` | `alert`, `config`, `stats` | `detect`, `logs`, `web` |
+| `web.rs` | `alert`, `stats` | `detect`, `logs`, `llm` |
+| `main.rs` | tous | — |
+
+`main.rs` est la **racine de composition** : c'est le seul endroit qui crée les composants et les relie entre eux (canaux, `Arc` partagés). Changer de serveur LLM, ou désactiver le triage IA, ne demande donc aucune modification des détecteurs.
+
+Autre principe de découpage : **la logique de décision ne fait pas d'entrées/sorties**. `parse_packet`, `parse_dns_query`, les détecteurs, `LogAnalyzer::analyze`, `parse_analysis` et `banner::render` ne touchent ni au réseau, ni aux fichiers, ni au LLM. Ils se testent avec de simples valeurs en mémoire, et les I/O restent en bordure (sockets, sous-processus, HTTP).
+
+### Design patterns utilisés
+
+Cyward est construit sur **8 design patterns**. Le schéma montre où chacun intervient dans le parcours d'une donnée, du paquet ou de la ligne de log jusqu'au navigateur et au LLM. Chaque pattern est ensuite détaillé avec ses rôles, le vrai code et la façon de s'en servir.
+
+```
+ ┌──────────────── ⑧ Racine de composition : main.rs crée et relie tous les composants ────────────────┐
+ │                                                                                                     │
+ │  interface réseau ─► capture ══⑤══► Engine ──①──► PortScan, BruteForce, SynFlood,                   │
+ │                     (thread)                       Beaconing, Volume, Dns                           │
+ │                                                          │ Alert::new(..).src(..)… ②                │
+ │  journalctl, tail ◄──⑦── supervise ══⑤══► LogAnalyzer ───┤                                          │
+ │                                                          ▼                                          │
+ │                                                    AlertSink ③ ══⑤══► worker LLM                    │
+ │                                                          │                                          │
+ │                                                          ▼                                          │
+ │                                                    AlertStore ──④──► clients SSE du dashboard       │
+ │                                                                         ▲                           │
+ │                                                    web.rs : ⑥ middleware d'authentification         │
+ └─────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+ ① Strategy  ② Builder  ③ Façade  ④ Observer  ⑤ Producteur/consommateur (══ canal)
+ ⑥ Middleware  ⑦ Superviseur  ⑧ Racine de composition
+```
+
+| # | Pattern | Où | Problème résolu dans Cyward |
+|---|---|---|---|
+| ① | **Strategy** | `trait Detector`, `Engine` (`src/detect/`) | Ajouter une détection sans toucher au moteur |
+| ② | **Builder** | `Alert::new(...).src(...)...` (`src/alert.rs`) | Construire lisiblement une alerte aux nombreux champs optionnels |
+| ③ | **Façade** | `AlertSink::emit` (`src/alert.rs`) | Un point d'entrée unique qui masque stockage, dédoublonnage et triage IA |
+| ④ | **Observer** | `AlertStore` + canal `broadcast` → SSE (`src/alert.rs`, `src/web.rs`) | Prévenir un nombre inconnu de navigateurs à chaque changement |
+| ⑤ | **Producteur/consommateur** | canaux `mpsc` (`main.rs`, `capture.rs`, `logs.rs`, `llm.rs`) | Découpler des étages de vitesses très différentes |
+| ⑥ | **Middleware** | `auth` (`src/web.rs`) | Appliquer le contrôle d'accès à toutes les routes en un seul endroit |
+| ⑦ | **Superviseur** | `logs::supervise` (`src/logs.rs`) | Relancer une source de logs qui s'arrête |
+| ⑧ | **Racine de composition** | `start_pipeline`, `run` (`src/main.rs`) | Injecter les dépendances au lieu d'un état global |
+
+#### ① Strategy : les détecteurs
+
+**Principe** : une famille d'algorithmes interchangeables derrière une interface commune. Le code qui les utilise ne connaît que l'interface.
+
+**Rôles dans Cyward :**
+- **Interface de stratégie** : le trait `Detector`.
+- **Stratégies concrètes** : `PortScan`, `BruteForce`, `SynFlood` (`scan.rs`), `Beaconing` (`beacon.rs`), `Volume` (`volume.rs`), `Dns` (`dns.rs`).
+- **Contexte** : `Engine`, qui détient les stratégies sous forme de `Box<dyn Detector>` et leur distribue chaque paquet sans savoir ce qu'elles font.
+
+```rust
+// src/detect/mod.rs — l'interface commune
+pub trait Detector: Send {
+    fn on_packet(&mut self, p: &PacketMeta, out: &mut Vec<Alert>);
+    fn tick(&mut self, _now: f64, _out: &mut Vec<Alert>) {}
+}
+
+// Le contexte ne manipule que le trait…
+pub struct Engine {
+    detectors: Vec<Box<dyn Detector>>,
+    // …
+}
+
+// …et appelle chaque stratégie de la même façon.
+for d in &mut self.detectors {
+    d.on_packet(p, &mut out);
+}
+```
+
+**Utilisation** : un nouveau détecteur est une nouvelle structure qui implémente `Detector`, ajoutée à la liste de `Engine::new`. Ni le moteur ni les autres détecteurs ne sont modifiés (principe ouvert/fermé). Le skill `/nouveau-detecteur` décrit la démarche complète.
+
+#### ② Builder : la construction des alertes
+
+**Principe** : construire un objet complexe étape par étape, en ne renseignant que les parties utiles.
+
+**Rôles dans Cyward :**
+- **Construction de base** : `Alert::new(kind, severity, source, date, titre)`, qui reçoit les champs obligatoires.
+- **Étapes facultatives** : `.description()`, `.src()`, `.dst()`, `.evidence()`, `.fingerprint()`. Chacune prend l'alerte et la renvoie complétée, ce qui permet de les chaîner.
+
+```rust
+// src/detect/scan.rs — chaque détecteur ne renseigne que ce qui le concerne
+Alert::new(AlertKind::BruteForce, Severity::High, AlertSource::Network, ts_to_dt(p.ts), format!("Force brute probable sur {}:{} depuis {}", p.dst, p.dport, p.src))
+    .description(format!("{} connexions TCP vers le port {} ({}) en moins de {} s.", /* … */))
+    .src(p.src)
+    .dst(format!("{}:{}", p.dst, p.dport))
+    .evidence(json!({ "connections": count, "port": p.dport, "service": service_name(p.dport) }))
+```
+
+C'est la forme idiomatique du Builder en Rust : pas de structure `AlertBuilder` séparée, puisque l'alerte est valide à chaque étape.
+
+**Utilisation** : un nouveau champ optionnel d'alerte s'ajoute avec sa méthode chaînable dans `impl Alert`, sans changer la signature de `Alert::new` ni les appels existants.
+
+#### ③ Façade : le point d'entrée des alertes
+
+**Principe** : une interface simple devant un ensemble de sous-systèmes.
+
+**Rôles dans Cyward :**
+- **Façade** : `AlertSink`, et sa seule méthode `emit(alert)`.
+- **Sous-systèmes masqués** : l'`AlertStore` (enregistrement, dédoublonnage), la file d'analyse du LLM et le suivi du statut de triage.
+- **Clients** : le moteur de détection (`run_engine`) et l'analyse des logs (`logs::run`).
+
+```rust
+// src/alert.rs
+pub fn emit(&self, alert: Alert) {
+    // Enregistrement et dédoublonnage : une répétition fusionnée s'arrête là.
+    let Some(new) = self.store.push(alert) else { return };
+    if let Some(tx) = &self.triage
+        && new.severity >= self.min_severity
+    {
+        self.store.update(new.id, |a| a.triage = TriageStatus::Pending);
+        if tx.try_send(new.id).is_err() { /* file pleine : pas d'analyse */ }
+    }
+}
+```
+
+**Utilisation** : tout nouveau producteur d'alertes reçoit un `AlertSink` et appelle `emit`. Il ne doit jamais écrire directement dans le store ni dans la file du LLM. Une règle transverse (par exemple notifier un webhook) s'ajoute ici, une seule fois, pour toutes les sources.
+
+#### ④ Observer : la diffusion en direct au dashboard
+
+**Principe** : un sujet prévient automatiquement tous ses observateurs quand son état change, sans les connaître.
+
+**Rôles dans Cyward :**
+- **Sujet** : `AlertStore`, qui possède l'émetteur `events: broadcast::Sender<AlertEvent>`.
+- **Événements** : `AlertEvent::New` et `AlertEvent::Update`.
+- **Observateurs** : chaque connexion SSE d'un navigateur. Elle s'abonne avec `subscribe()` et reçoit une copie de chaque événement.
+
+```rust
+// src/alert.rs — le sujet publie à chaque création ou mise à jour
+let _ = self.events.send(AlertEvent::New(alert.clone()));
+
+// src/web.rs — chaque navigateur connecté devient un observateur
+let stream = BroadcastStream::new(s.store.subscribe()) /* … → événements SSE */;
+```
+
+**Utilisation** : un nouveau consommateur en temps réel (export vers un SIEM, notifications) s'abonne avec `store.subscribe()`, sans modifier le store ni les détecteurs.
+
+#### ⑤ Producteur/consommateur : le pipeline par canaux
+
+**Principe** : les étages communiquent par des files (canaux `tokio::sync::mpsc`) au lieu de s'appeler directement. Chacun travaille à son rythme.
+
+| Producteur | File | Consommateur | Si la file est pleine |
+|---|---|---|---|
+| Thread de capture (`capture::spawn_live`) | `PacketMeta`, taille `capture.queue_size` | Moteur (`run_engine`) | `try_send` : le paquet est abandonné et compté comme « perdu ». La capture ne doit jamais bloquer. |
+| Rejeu de pcap (`capture::replay`) | `PacketMeta`, 4 096 | Moteur | `send().await` : on attend, aucun paquet n'est perdu. |
+| Sources de logs (`logs::follow`) | `LogLine`, 4 096 | `LogAnalyzer` | `send().await` : on attend. |
+| `AlertSink::emit` | identifiants d'alerte, `llm.queue_size` | Worker LLM (`llm.rs`) | `try_send` : l'alerte reste visible mais n'est pas analysée. La détection ne ralentit jamais à cause du LLM. |
+
+```rust
+// src/capture.rs — producteur qui ne doit jamais bloquer
+if let Some(meta) = parse_packet(data, link, now_secs())
+    && tx.try_send(meta).is_err()
+{
+    // … compte le paquet comme perdu
+}
+```
+
+**Utilisation** : un nouvel étage lent ou bloquant (I/O, appel réseau) se branche par une file bornée, jamais par un appel direct depuis le chemin de détection. Choisir `try_send` si le producteur ne doit pas attendre, `send().await` sinon.
+
+#### ⑥ Middleware : le contrôle d'accès
+
+**Principe** : un traitement placé devant les handlers, qui laisse passer la requête ou l'arrête (chaîne de responsabilité).
+
+**Rôles dans Cyward :** la fonction `auth` vérifie le jeton, puis transmet la requête au maillon suivant (`next.run(req)`) ou renvoie une erreur 401.
+
+```rust
+// src/web.rs — appliqué une seule fois à toutes les routes
+.layer(middleware::from_fn_with_state(state.clone(), auth))
+
+async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
+    // … jeton valide : on passe au handler, sinon 401
+    if ok { next.run(req).await } else { /* 401 */ }
+}
+```
+
+**Utilisation** : tout comportement commun à toutes les routes (journalisation des accès, limitation de débit, en-têtes de sécurité) s'ajoute comme nouvelle couche `.layer(...)`, sans toucher aux handlers.
+
+#### ⑦ Superviseur : la résilience des sources de logs
+
+**Principe** : une tâche surveille une tâche fragile et la relance quand elle s'arrête.
+
+**Rôles dans Cyward :** `supervise` relance `follow`, qui exécute `journalctl` ou `tail`, après chaque arrêt, avec 10 s de pause.
+
+```rust
+// src/logs.rs
+async fn supervise(program: &'static str, args: Vec<String>, tx: mpsc::Sender<LogLine>, parse: fn(&str) -> Option<LogLine>) {
+    loop {
+        if let Err(e) = follow(program, &args, &tx, parse).await { /* journalise */ }
+        // Plus personne ne lit la file : arrêt définitif.
+        if tx.is_closed() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+}
+```
+
+**Utilisation** : toute nouvelle source externe susceptible de s'interrompre (sous-processus, connexion à un service) se lance via un superviseur. Sa panne ne doit pas arrêter l'agent.
+
+#### ⑧ Racine de composition : l'injection des dépendances
+
+**Principe** : un seul endroit crée les objets et leur passe leurs dépendances. Les composants ne vont rien chercher eux-mêmes.
+
+**Rôles dans Cyward :** `start_pipeline` et `run` (`src/main.rs`) créent le store, les compteurs, les canaux et les tâches, puis les relient. Aucun module ne crée ses dépendances ni ne les lit dans un état global.
+
+```rust
+// src/main.rs
+let store = Arc::new(AlertStore::new(5000, cfg.detection.alert_cooldown_secs));
+let triage = if cfg.llm.enabled { Some(llm::spawn(cfg.llm.clone(), store.clone(), stats.clone())?) } else { None };
+let sink = AlertSink::new(store.clone(), triage, cfg.llm.min_severity);
+// … puis web::serve(…, store, stats), capture::spawn_live(…, tx, stats), etc.
+```
+
+**Utilisation** : un nouveau composant reçoit ce dont il a besoin en paramètre (`Arc<AlertStore>`, `Arc<Stats>`, un émetteur de canal) et c'est `main.rs` qui le branche. C'est ce qui permet de le tester isolément avec de fausses dépendances, et de désactiver un étage (`--no-llm`) sans toucher aux autres.
+
+Ce pattern explique aussi l'absence d'état global ou de singleton : l'état partagé circule explicitement en `Arc`, avec des atomiques pour les compteurs et des verrous courts pour le reste.
 
 ---
 

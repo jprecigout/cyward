@@ -28,6 +28,7 @@ Si l'information nécessaire n'est pas dans `PacketMeta`, l'ajouter dans `src/ca
 5. **Scénario de simulation** dans `examples/gen_attacks.rs` : ajouter l'attaque au scénario (les paquets sont triés à l'écriture). Ajouter la sous-chaîne de son titre dans `EXPECTED_TITLES` de `.claude/skills/verifier/check.sh`.
 6. **Configuration d'exemple** : la section `[detection.<nom>]` dans `config.example.toml`, avec les valeurs par défaut et un commentaire par clé.
 7. **Documentation** :
+   - README section 2 : le nouveau fichier dans l'arborescence ; le tableau des dépendances si le détecteur importe un module de plus ; le tableau des design patterns s'il en introduit un ;
    - README section 3 : une sous-section « 3.x » (ce qui est repéré, fonctionnement, sévérité, faux positifs fréquents, techniques MITRE) ;
    - README section 7 : le tableau de configuration ;
    - README section 8 : le type dans la liste des `kind` ;
