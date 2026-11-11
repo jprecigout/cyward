@@ -24,6 +24,7 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
   | `web.rs` | `alert`, `anomaly`, `names`, `stats` |
   | `names.rs` | `alert`, `config` |
   | `notify.rs` (et `notify/channels.rs`) | `alert`, `config` |
+| `history.rs` (et `history/repository.rs`) | `alert`, `config` |
 
   Les producteurs d'alertes (`detect/`, `logs.rs`) ne dépendent jamais des consommateurs (`llm`, `web`), et inversement. `anomaly/` (apprentissage du comportement normal) ne dépend ni de `detect`, ni de `llm`, ni de `web` : ce sont eux qui l'utilisent. Seul `main.rs` assemble le tout (racine de composition).
 - **Logique pure séparée des entrées/sorties** : le parsing et la décision (`parse_packet`, `parse_dns_query`, `LogAnalyzer::analyze`, `parse_analysis`, les détecteurs, et dans `anomaly/` les caractéristiques, l'Isolation Forest et le diff) ne font aucune I/O. C'est ce qui les rend testables sans réseau, sans fichier, sans LLM. Les I/O (sockets, sous-processus, HTTP) restent en bordure.
@@ -34,11 +35,11 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
   | Strategy (trait + objets `Box<dyn …>`) | `trait Detector`, `Engine` ; `trait LogRule`, `LogAnalyzer` (`logs/rules.rs`) ; `trait Notifier` (`notify/channels.rs`) | Tout nouveau détecteur, règle de log, canal de notification ou analyseur interchangeable |
   | Builder | `Alert::new(...).src(...).dst(...).evidence(...)` | Construire des objets à nombreux champs optionnels |
   | Façade / point d'entrée unique | `AlertSink::emit` ; `Baseline` (`anomaly/baseline.rs`) | Tout ce qui produit des alertes : ne jamais écrire directement dans le store ou la file LLM. Tout ce qui touche au comportement normal passe par `Baseline`, qui applique les garde-fous de validation |
-  | Observer (publication/abonnement) | `AlertStore` + `broadcast` → clients SSE, notifications (`notify.rs`) | Diffuser des événements à plusieurs consommateurs |
+  | Observer (publication/abonnement) | `AlertStore` + `broadcast` → clients SSE, notifications (`notify.rs`), historique (`history.rs`) | Diffuser des événements à plusieurs consommateurs |
   | Producteur/consommateur (pipeline par canaux) | capture → moteur, sources de logs → analyseur, sink → LLM | Découpler un producteur rapide d'un consommateur lent (canal borné, `try_send` si le producteur ne doit pas bloquer) |
   | Middleware (chaîne de responsabilité) | `auth`, et `write_guard` sur les routes d'écriture (`web.rs`) | Comportements transverses du serveur web ; toute nouvelle route d'écriture va dans le routeur protégé par `write_guard` |
   | Superviseur | `logs::supervise` | Tâche externe à relancer après une panne |
-  | Repository | `Storage` (`anomaly/storage.rs`) | Toute persistance sur disque : le reste du code ne connaît ni les fichiers ni leur format |
+  | Repository | `Storage` (`anomaly/storage.rs`) ; `AlertRepository` (`history/repository.rs`, SQLite) | Toute persistance sur disque : le reste du code ne connaît ni les fichiers ni leur format |
 
 - **Ouvert à l'extension, fermé à la modification** : une nouvelle détection s'ajoute en écrivant une nouvelle implémentation et en l'enregistrant (`Engine::new`), pas en ajoutant des cas dans le code existant.
 - **Les types plutôt que des valeurs brutes** : des enums (`Severity`, `AlertKind`, `TriageStatus`, `Proto`) plutôt que des chaînes ou des booléens ; une struct de configuration avec `#[serde(default)]` et `impl Default` par sous-système.
@@ -131,6 +132,7 @@ logs.rs (journalctl -f -o json / tail -F, sous-processus relancés) ─► LogAn
                                      AlertSink::emit ─► AlertStore (dédoublonnage + broadcast) ─► web.rs (SSE)
                                             └─ si sévérité ≥ llm.min_severity ─► file mpsc<u64> ─► llm.rs
                                      AlertStore ─broadcast─► notify.rs (décision) ─mpsc─► ntfy, webhook
+                                     AlertStore ─broadcast─► history.rs (lots) ─mpsc─► thread SQLite (history.path)
 
 detect/anomaly.rs (HostAnomaly) ─► anomaly::Baseline ◄─ anomaly::trainer (périodique) ◄─ web.rs (réponses, validation)
                                          └─► anomaly::Storage (data_dir)
@@ -163,6 +165,7 @@ Points qui demandent de lire plusieurs fichiers pour être compris :
   - Le prompt inclut jusqu'à 8 alertes récentes impliquant les mêmes hôtes, comparées sans le port grâce à `host_part`.
   - `parse_analysis` est volontairement tolérant : il extrait le JSON entouré de texte, accepte une confiance en `"85%"` et un champ `mitre` en chaîne simple.
 - **Mémoire bornée.** Tout l'état des détecteurs est en `HashMap` purgées dans `tick`, avec des plafonds (`MAX_TRACKED` dans beacon, `MAX_SCAN_ENTRIES` et `MAX_BRUTEFORCE_COUNTERS` dans scan, 10 000 sources dans synflood, purge des échecs dans logs). Un plafond se rend testable par un champ (`max_entries`, `max_counters`) initialisé à la constante et réduit dans les tests. L'`AlertStore` garde 5 000 alertes. Tout nouvel état doit avoir sa purge.
+- **Historique des alertes** (`src/history.rs`, désactivé tant que `history.path` est vide). Il recharge le store au démarrage (`AlertStore::restore`) puis écrit par lots depuis un thread dédié : ne jamais écrire en base depuis `emit` ni sous le verrou du store. La taille est bornée par âge et par nombre, avec une purge anticipée après `max_alerts / 10` alertes nouvelles (inondation). Le rejeu n'y écrit jamais.
 - **Interne / externe.** `DetectionConfig::is_local` (basé sur `local_networks`) détermine :
   - la sévérité des scans (source interne = mouvement latéral = High) ;
   - les flux suivis par `Beaconing` et `Volume` (interne → externe uniquement).

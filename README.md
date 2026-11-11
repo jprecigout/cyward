@@ -136,6 +136,9 @@ cyward/
     │   └── rules.rs           # trait LogRule et règles d'analyse              ①
     ├── llm.rs                 # client du modèle, prompt, décodage du verdict  ⑤
     ├── names.rs               # noms des machines (DNS inverse, avec cache)
+    ├── history.rs             # historique des alertes : regroupement, rétention ④ ⑤
+    ├── history/
+    │   └── repository.rs      # base SQLite des alertes                        ⑨
     ├── notify.rs              # notifications : décision, plafond, envoi        ④ ⑤
     ├── notify/
     │   └── channels.rs        # trait Notifier : ntfy, webhook générique       ①
@@ -176,7 +179,7 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 
 **`alert.rs`** — Builder ② (`Alert`), Façade ③ (`AlertSink`), Observer ④ (`AlertStore`)
 - **`AlertSink`** est le point d'entrée unique des détecteurs. Il enregistre l'alerte et l'envoie en triage IA si sa sévérité le justifie.
-- **`AlertStore`** garde les 5 000 dernières alertes en mémoire.
+- **`AlertStore`** garde les 5 000 dernières alertes en mémoire. Si l'historique est activé (`[history]`), il les recharge au démarrage (`restore`).
 - Il **dédoublonne** les alertes selon une empreinte (type + source + cible). Une alerte identique pendant `alert_cooldown_secs` incrémente le compteur `count` de l'alerte existante au lieu d'en créer une nouvelle.
 - Chaque création ou mise à jour est diffusée aux navigateurs connectés.
 
@@ -192,6 +195,13 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 - S'abonne aux événements de l'`AlertStore`, comme le dashboard : ni les détecteurs ni le LLM ne le connaissent.
 - La décision (`Dispatcher`) est pure et testée sans réseau ; l'envoi tourne dans une autre tâche, derrière une file bornée, avec trois essais. Chaque canal implémente `trait Notifier`, qui construit la requête HTTP propre au service.
 - Détails : section 7, `[notify]`.
+
+**`history.rs`** — observateur ④, producteur/consommateur ⑤ ; `history/repository.rs` — Repository ⑨
+- Garde les alertes dans une base **SQLite** (`history.path`) : elles survivent au redémarrage, triage du LLM et réponses comprises. Au démarrage, les 5 000 plus récentes sont rechargées dans l'`AlertStore` et les identifiants reprennent où ils s'étaient arrêtés.
+- S'abonne aux événements de l'`AlertStore`, comme le dashboard et les notifications. Les écritures passent par un thread dédié derrière une file bornée : la détection n'attend jamais le disque.
+- Une alerte modifiée plusieurs fois (répétitions, verdict du LLM) n'est écrite qu'une fois par lot, toutes les 5 s, en une transaction.
+- **Protection contre une inondation** : purge par âge (`retention_days`) et par nombre (`max_alerts`) toutes les heures, et dès que `max_alerts / 10` alertes nouvelles ont été écrites. Les preuves d'une alerte sont plafonnées à 4 Ko. Détails : section 7, `[history]`.
+- La décision (regroupement `Batcher`, politique `Retention`) est pure et testée sans disque ; `AlertRepository` est seul à connaître SQLite.
 
 **`names.rs`**
 - Donne le nom des machines (DNS inverse, enregistrement PTR) affiché à côté des adresses dans le dashboard, via `GET /api/names`. Rien n'est résolu sur le chemin de la détection, et les alertes ne changent pas.
@@ -219,11 +229,12 @@ Les dépendances vont dans un seul sens : les **producteurs** d'alertes (`detect
 | `web.rs` | `alert`, `anomaly`, `names`, `stats` | `detect`, `logs`, `llm` |
 | `names.rs` | `alert` (`host_part`), `config` | `detect`, `logs`, `llm`, `web` |
 | `notify.rs` (et `notify/channels.rs`) | `alert`, `config` | `detect`, `logs`, `llm`, `web` |
+| `history.rs` (et `history/repository.rs`) | `alert`, `config` | `detect`, `logs`, `llm`, `web` |
 | `main.rs` | tous | — |
 
 `main.rs` est la **racine de composition** : c'est le seul endroit qui crée les composants et les relie entre eux (canaux, `Arc` partagés). Changer de serveur LLM, ou désactiver le triage IA, ne demande donc aucune modification des détecteurs.
 
-Autre principe de découpage : **la logique de décision ne fait pas d'entrées/sorties**. `parse_packet`, `parse_dns_query`, les détecteurs, `LogAnalyzer::analyze`, `parse_analysis`, `banner::render`, la lecture des réponses DNS de `names.rs`, ainsi que les caractéristiques, l'Isolation Forest et le diff de `anomaly/`, ne touchent ni au réseau, ni aux fichiers, ni au LLM. Ils se testent avec de simples valeurs en mémoire, et les I/O restent en bordure (sockets, sous-processus, HTTP).
+Autre principe de découpage : **la logique de décision ne fait pas d'entrées/sorties**. `parse_packet`, `parse_dns_query`, les détecteurs, `LogAnalyzer::analyze`, `parse_analysis`, `banner::render`, la lecture des réponses DNS de `names.rs`, les caractéristiques, l'Isolation Forest et le diff de `anomaly/`, ainsi que le regroupement et la rétention de `history.rs`, ne touchent ni au réseau, ni aux fichiers, ni au LLM. Ils se testent avec de simples valeurs en mémoire, et les I/O restent en bordure (sockets, sous-processus, HTTP).
 
 ### Design patterns utilisés
 
@@ -240,7 +251,7 @@ Cyward est construit sur **9 design patterns**. Le schéma montre où chacun int
  │                                                     AlertSink ③ ══⑤══► worker LLM               │
  │                                                           │                                     │
  │                                                           ▼                                     │
- │                                                     AlertStore ──④──► clients SSE du dashboard  │
+ │  SQLite ◄── AlertRepository ⑨ ◄══⑤══ history ◄──④── AlertStore ──④──► clients SSE du dashboard  │
  │                                                                          ▲                      │
  │                                                     web.rs : ⑥ middlewares (accès, écriture)    │
  │                                                                                                 │
@@ -259,12 +270,12 @@ Cyward est construit sur **9 design patterns**. Le schéma montre où chacun int
 | ① | **Strategy** | `trait Detector`, `Engine` (`src/detect/`) ; `trait LogRule`, `LogAnalyzer` (`src/logs/rules.rs`) ; `trait Notifier` (`src/notify/channels.rs`) | Ajouter une détection réseau (y compris l'apprentissage du comportement normal), une règle de log ou un canal de notification sans toucher au code existant |
 | ② | **Builder** | `Alert::new(...).src(...)...` (`src/alert.rs`) | Construire lisiblement une alerte aux nombreux champs optionnels |
 | ③ | **Façade** | `AlertSink::emit` (`src/alert.rs`) ; `Baseline` (`src/anomaly/baseline.rs`) | Un point d'entrée unique qui masque un sous-système : stockage et triage des alertes ; cycle de vie du comportement normal |
-| ④ | **Observer** | `AlertStore` + canal `broadcast` → SSE (`src/alert.rs`, `src/web.rs`), notifications (`src/notify.rs`) | Prévenir un nombre inconnu de navigateurs, et le service de notifications, à chaque changement |
-| ⑤ | **Producteur/consommateur** | canaux `mpsc` (`main.rs`, `capture.rs`, `logs.rs`, `llm.rs`, `notify.rs`) | Découpler des étages de vitesses très différentes |
+| ④ | **Observer** | `AlertStore` + canal `broadcast` → SSE (`src/alert.rs`, `src/web.rs`), notifications (`src/notify.rs`), historique (`src/history.rs`) | Prévenir un nombre inconnu de navigateurs, le service de notifications et l'historique sur disque à chaque changement |
+| ⑤ | **Producteur/consommateur** | canaux `mpsc` (`main.rs`, `capture.rs`, `logs.rs`, `llm.rs`, `notify.rs`, `history.rs`) | Découpler des étages de vitesses très différentes |
 | ⑥ | **Middleware** | `auth`, `write_guard` (`src/web.rs`) | Appliquer le contrôle d'accès à toutes les routes, et un contrôle renforcé aux routes d'écriture, en un seul endroit |
 | ⑦ | **Superviseur** | `logs::supervise` (`src/logs.rs`) | Relancer une source de logs qui s'arrête |
 | ⑧ | **Racine de composition** | `start_pipeline`, `run` (`src/main.rs`) | Injecter les dépendances au lieu d'un état global |
-| ⑨ | **Repository** | `Storage` (`src/anomaly/storage.rs`) | Isoler la persistance : le reste du code manipule des structures, sans savoir où ni comment elles sont écrites |
+| ⑨ | **Repository** | `Storage` (`src/anomaly/storage.rs`) ; `AlertRepository` (`src/history/repository.rs`) | Isoler la persistance : le reste du code manipule des structures, sans savoir où ni comment elles sont écrites (fichiers JSON de l'apprentissage, base SQLite des alertes) |
 
 #### ① Strategy : les détecteurs
 
@@ -355,7 +366,7 @@ pub fn emit(&self, alert: Alert) {
 **Rôles dans Cyward :**
 - **Sujet** : `AlertStore`, qui possède l'émetteur `events: broadcast::Sender<AlertEvent>`.
 - **Événements** : `AlertEvent::New` et `AlertEvent::Update`.
-- **Observateurs** : chaque connexion SSE d'un navigateur, et la tâche des notifications (`notify::watch`). Chacun s'abonne avec `subscribe()` et reçoit une copie de chaque événement.
+- **Observateurs** : chaque connexion SSE d'un navigateur, la tâche des notifications (`notify::watch`) et celle de l'historique (`history::watch`). Chacun s'abonne avec `subscribe()` et reçoit une copie de chaque événement.
 
 ```rust
 // src/alert.rs — le sujet publie à chaque création ou mise à jour
@@ -378,6 +389,7 @@ let stream = BroadcastStream::new(s.store.subscribe()) /* … → événements S
 | Sources de logs (`logs::follow`) | `LogLine`, 4 096 | `LogAnalyzer` | `send().await` : on attend. |
 | `AlertSink::emit` | identifiants d'alerte, `llm.queue_size` | Worker LLM (`llm.rs`) | `try_send` : l'alerte reste visible mais n'est pas analysée. La détection ne ralentit jamais à cause du LLM. |
 | Décision des notifications (`notify::watch`) | `Notification`, 64 | Envoi (`notify::deliver`) | `try_send` : la notification est abandonnée (avec un avertissement). Un service de notification en panne ne bloque rien. |
+| Regroupement de l'historique (`history::watch`) | lots d'alertes, 4 | Thread d'écriture SQLite (`history::write_loop`) | `try_send` : le lot reste en attente et part avec le suivant (10 000 alertes en attente au plus). Un disque lent ne bloque rien. |
 
 ```rust
 // src/capture.rs — producteur qui ne doit jamais bloquer
@@ -440,7 +452,8 @@ async fn supervise(program: &'static str, args: Vec<String>, tx: mpsc::Sender<Lo
 
 ```rust
 // src/main.rs
-let store = Arc::new(AlertStore::new(5000, cfg.detection.alert_cooldown_secs));
+let store = Arc::new(AlertStore::new(STORE_CAPACITY, cfg.detection.alert_cooldown_secs));
+let history = if cfg.history.path.is_empty() { None } else { Some(history::spawn(cfg.history.clone(), store.clone(), STORE_CAPACITY)?) };
 let triage = if cfg.llm.enabled { Some(llm::spawn(cfg.llm.clone(), store.clone(), stats.clone())?) } else { None };
 let sink = AlertSink::new(store.clone(), triage, cfg.llm.min_severity);
 // … puis web::serve(…, store, stats), capture::spawn_live(…, tx, stats), etc.
@@ -450,7 +463,7 @@ let sink = AlertSink::new(store.clone(), triage, cfg.llm.min_severity);
 
 Ce pattern explique aussi l'absence d'état global ou de singleton : l'état partagé circule explicitement en `Arc`, avec des atomiques pour les compteurs et des verrous courts pour le reste.
 
-#### ⑨ Repository : la persistance de l'apprentissage
+#### ⑨ Repository : la persistance de l'apprentissage et des alertes
 
 **Principe** : un objet dédié lit et écrit les données sur leur support ; le reste du code ne manipule que des structures en mémoire.
 
@@ -467,6 +480,20 @@ pub fn save_model(&self, m: &Model) -> Result<()> {
 ```
 
 **Utilisation** : changer de format ou de support (SQLite, par exemple) ne touche que `storage.rs`. Sans `data_dir`, `Baseline` fonctionne simplement sans `Storage`, en mémoire.
+
+**Les alertes** suivent le même principe : `AlertRepository` (`src/history/repository.rs`) est seul à connaître la base SQLite (`history.path`), son schéma et ses réglages (WAL, `auto_vacuum` incrémental). `history.rs` lui confie des lots d'`Alert` et lui demande les purges, sans écrire une ligne de SQL.
+- Table `alerts` : l'alerte complète en JSON (`data`), plus des colonnes indexables (`kind`, `severity`, `src`, `dst`, `first_seen`, `last_seen` en secondes Unix) pour les purges et les requêtes à la main. Table `meta` : le prochain identifiant, conservé même si toutes les alertes sont purgées.
+- Une écriture remplace l'alerte par son identifiant (`INSERT … ON CONFLICT DO UPDATE`) : réécrire une alerte est sans risque, ce qui permet de tout réécrire après des événements perdus.
+
+```rust
+// src/history/repository.rs — purge par âge, puis par nombre (les moins récemment vues)
+let mut removed = tx.execute("DELETE FROM alerts WHERE last_seen < ?1", [cutoff.timestamp()])?;
+removed += tx.execute(
+    "DELETE FROM alerts WHERE id IN
+         (SELECT id FROM alerts ORDER BY last_seen DESC, id DESC LIMIT -1 OFFSET ?1)",
+    [max_alerts as i64],
+)?;
+```
 
 ---
 
@@ -785,6 +812,7 @@ Le premier lancement télécharge environ 5 Go de modèle. Le dashboard est ensu
       volumes:
         - ./docker/cyward.local.toml:/etc/cyward/cyward.toml:ro
   ```
+- **Historique des alertes** : activé dans l'image, dans `/var/lib/cyward/alerts.db` (volume `cyward-data`).
 - **Apprentissage du comportement normal** : activé dans l'image, en mode observation. Ses données sont dans le volume `cyward-data` (`/var/lib/cyward`), seul emplacement accessible en écriture. Définir `web.token` pour pouvoir répondre et valider depuis le dashboard.
 - **Modèle** : pour en changer, modifie `llm.model` dans `docker/cyward.toml` **et** définis `CYWARD_MODEL` (dans `.env` ou l'environnement) avec la même valeur.
 - **GPU NVIDIA** : décommente le bloc `deploy` du service `ollama` (nécessite `nvidia-container-toolkit`).
@@ -1039,6 +1067,31 @@ Le corps JSON du webhook est accepté tel quel par plusieurs services : `title`,
 
 Vérifie la configuration avec `cyward check-notify`, qui envoie une notification de test sur chaque canal.
 
+### `[history]`
+
+Historique des alertes dans une base **SQLite**. Les alertes survivent au redémarrage : les 5 000 plus récentes sont rechargées dans le dashboard, avec leur analyse IA et les réponses. Désactivé tant que `path` est vide. Le rejeu (`cyward replay`) n'y écrit jamais.
+
+| Clé | Défaut | Description |
+|---|---|---|
+| `path` | `""` | Fichier de la base, créé au besoin avec son dossier (ex. `/var/lib/cyward/alerts.db`). Vide = alertes en mémoire seulement |
+| `retention_days` | `90.0` | Durée de conservation d'une alerte après sa dernière occurrence, en jours |
+| `max_alerts` | `100000` | Nombre maximal d'alertes en base ; au-delà, les moins récemment vues sont supprimées |
+
+**Taille bornée, même sous une inondation.** Un attaquant peut provoquer beaucoup d'alertes distinctes en peu de temps ; une rétention par âge seule le laisserait remplir le disque. Cyward combine donc :
+- **l'âge** (`retention_days`), pour le besoin d'historique ;
+- **un plafond** (`max_alerts`), garde-fou absolu. La purge a lieu toutes les heures, mais aussi dès que `max_alerts / 10` alertes nouvelles ont été écrites : la base ne dépasse jamais le plafond de plus de 10 % (plus un lot de 500) ;
+- **des preuves plafonnées** à 4 Ko par alerte (au-delà, un extrait de 1 Ko les remplace dans la base).
+
+Une alerte pèse de 1 à 2 Ko : avec les valeurs par défaut, la base reste sous 200 à 250 Mo. L'espace libéré par les purges est rendu au système (`auto_vacuum` incrémental). Une limite abaissée s'applique dès le démarrage suivant.
+
+**Performances.** La détection n'attend jamais le disque : les alertes modifiées sont regroupées (une écriture par alerte et par lot, même si elle a été mise à jour dix fois) et écrites toutes les 5 s par un thread dédié, en une transaction, en mode WAL. À l'arrêt (Ctrl+C), le dernier lot est écrit ; une coupure brutale peut faire perdre les 5 dernières secondes.
+
+**Consulter la base** (lecture possible pendant que l'agent tourne) :
+
+```bash
+sqlite3 /var/lib/cyward/alerts.db "SELECT id, datetime(last_seen, 'unixepoch'), severity, kind, src, dst FROM alerts ORDER BY last_seen DESC LIMIT 20"
+```
+
 ---
 
 ## 8. Le dashboard et l'API
@@ -1068,7 +1121,7 @@ Toutes les routes acceptent le jeton en `?token=` ou en `Authorization: Bearer �
 
 | Route | Réponse |
 |---|---|
-| `GET /api/alerts?limit=500` | Les alertes, de la plus récente à la plus ancienne (5 000 au maximum) |
+| `GET /api/alerts?limit=500` | Les alertes en mémoire, de la plus récente à la plus ancienne (5 000 au maximum ; l'historique complet est dans la base SQLite) |
 | `GET /api/alerts/{id}` | Une alerte |
 | `GET /api/stats` | `{ "stats": {...}, "alerts_by_severity": {...} }` |
 | `GET /api/events` | Flux SSE : `{"type":"new"\|"update","alert":{...}}` |
@@ -1120,7 +1173,7 @@ Format d'une alerte :
 
 **Réponse (`feedback`)** : présente sur une anomalie à laquelle l'utilisateur a répondu : `verdict`, `reason`, `scope`, `at`.
 
-Les alertes sont gardées **en mémoire** : elles disparaissent au redémarrage (l'apprentissage du comportement normal, lui, est persisté dans `data_dir`). Pour les conserver ou les centraliser, interroge l'API, ou écoute le flux SSE et envoie les événements vers ton SIEM.
+Par défaut, les alertes sont gardées **en mémoire** et disparaissent au redémarrage. Avec `history.path` (section 7, `[history]`), elles sont aussi enregistrées dans une base SQLite et rechargées au démarrage. Pour les centraliser, écoute le flux SSE et envoie les événements vers ton SIEM.
 
 ---
 
@@ -1317,7 +1370,7 @@ Un outil de détection est une cible de choix : il voit tout le réseau. Plusieu
 - **Domaine DNS naïf :** le domaine est pris comme les deux derniers segments. `exemple.co.uk` est donc vu comme `co.uk`, ce qui peut fusionner des domaines distincts dans le détecteur de tunnel.
 - **Beaconing :** seul le TCP est suivi ; une balise en UDP ou QUIC n'est pas détectée.
 - **Fragmentation et IPv6 :** les fragments IP et les en-têtes d'extension IPv6 exotiques peuvent échapper au parsing.
-- **Historique en mémoire :** 5 000 alertes au maximum, perdues au redémarrage. L'apprentissage du volume repart aussi de zéro.
+- **Historique :** sans `history.path`, 5 000 alertes au maximum, perdues au redémarrage. Avec, le dashboard et l'API ne montrent toujours que les 5 000 plus récentes ; le reste de la base se consulte avec `sqlite3`. Une analyse IA interrompue par l'arrêt ne reprend pas (l'alerte revient « non analysée »). L'apprentissage du volume repart de zéro.
 - **Un seul analyseur IA à la fois :** sur CPU, une rafale d'alertes peut prendre plusieurs minutes à être analysée.
 - **Fiabilité du LLM :** le modèle peut se tromper ou inventer une technique MITRE. Ses verdicts sont une aide au tri, pas une vérité.
 - **Linux uniquement** pour la capture live et la lecture des logs. Le rejeu de pcap fonctionne partout.
@@ -1326,7 +1379,7 @@ Un outil de détection est une cible de choix : il voit tout le réseau. Plusieu
 
 ## 16. Pistes d'évolution
 
-- Persistance des alertes et des normales apprises (SQLite).
+- Recherche dans l'historique des alertes depuis le dashboard (par hôte, type, période).
 - Export vers un SIEM : fichier JSON lignes, syslog, Elasticsearch, Loki, Wazuh.
 - Notifications pour les alertes critiques (ntfy, Discord, Slack, e-mail).
 - Ingestion des alertes Suricata (`eve.json`) et des logs Zeek, pour combiner signatures et comportement.

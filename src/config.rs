@@ -24,6 +24,7 @@ pub struct Config {
     pub web: WebConfig,
     pub names: NamesConfig,
     pub notify: NotifyConfig,
+    pub history: HistoryConfig,
 }
 
 impl Config {
@@ -426,6 +427,25 @@ pub struct NamesConfig {
 impl Default for NamesConfig {
     fn default() -> Self {
         Self { enabled: true, external: false, nameserver: String::new(), timeout_ms: 1000, cache_secs: 3600 }
+    }
+}
+
+/// Section `[history]` : historique des alertes sur disque (SQLite, voir `history.rs`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct HistoryConfig {
+    /// Fichier de la base SQLite (créé au besoin). Vide = alertes en mémoire seulement, perdues à l'arrêt.
+    pub path: String,
+    /// Durée de conservation d'une alerte après sa dernière occurrence, en jours.
+    pub retention_days: f64,
+    /// Nombre maximal d'alertes en base ; au-delà, les moins récemment vues sont supprimées.
+    /// Garde-fou contre une inondation : la base reste vers 1 à 2 Ko par alerte au plus.
+    pub max_alerts: usize,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self { path: String::new(), retention_days: 90.0, max_alerts: 100_000 }
     }
 }
 

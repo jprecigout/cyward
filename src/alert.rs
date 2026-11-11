@@ -149,8 +149,9 @@ pub struct Analysis {
     pub model: String,
 }
 
-/// Une alerte telle qu'exposée par l'API et affichée dans le dashboard.
-#[derive(Debug, Clone, Serialize)]
+/// Une alerte telle qu'exposée par l'API et affichée dans le dashboard. `Deserialize` sert à
+/// la relire depuis l'historique sur disque (`history.rs`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alert {
     /// Identifiant unique attribué par le store (0 tant que l'alerte n'est pas enregistrée).
     pub id: u64,
@@ -173,7 +174,7 @@ pub struct Alert {
     pub analysis: Option<Analysis>,
     /// Réponse de l'utilisateur (alertes d'anomalie uniquement).
     pub feedback: Option<Feedback>,
-    /// Clé de dédoublonnage, interne : non exposée dans l'API.
+    /// Clé de dédoublonnage, interne : non exposée dans l'API (l'historique la range à part).
     #[serde(skip)]
     pub fingerprint: String,
 }
@@ -267,6 +268,20 @@ struct StoreInner {
     by_fingerprint: HashMap<String, u64>,
 }
 
+impl StoreInner {
+    /// Évince les alertes les plus anciennes au-delà de `capacity`. L'index par empreinte n'est
+    /// nettoyé que s'il pointe encore sur l'alerte évincée (une plus récente a pu le remplacer).
+    fn evict(&mut self, capacity: usize) {
+        while self.alerts.len() > capacity {
+            if let Some(old) = self.alerts.pop_front()
+                && self.by_fingerprint.get(&old.fingerprint) == Some(&old.id)
+            {
+                self.by_fingerprint.remove(&old.fingerprint);
+            }
+        }
+    }
+}
+
 impl AlertStore {
     pub fn new(capacity: usize, cooldown_secs: u64) -> Self {
         // 256 événements en tampon par client ; un client trop lent perd les plus anciens
@@ -312,21 +327,31 @@ impl AlertStore {
         alert.fingerprint = fp.clone();
         inner.by_fingerprint.insert(fp, alert.id);
         inner.alerts.push_back(alert.clone());
-        // Éviction des plus anciennes au-delà de la capacité. L'index par empreinte n'est
-        // nettoyé que s'il pointe encore sur l'alerte évincée (une plus récente a pu le remplacer).
-        while inner.alerts.len() > self.capacity {
-            if let Some(old) = inner.alerts.pop_front()
-                && inner.by_fingerprint.get(&old.fingerprint) == Some(&old.id)
-            {
-                inner.by_fingerprint.remove(&old.fingerprint);
-            }
-        }
+        inner.evict(self.capacity);
         // Libérer le verrou avant de journaliser et diffuser.
         drop(inner);
 
         tracing::warn!(id = alert.id, kind = ?alert.kind, severity = ?alert.severity, src = ?alert.src, "{}", alert.title);
         let _ = self.events.send(AlertEvent::New(alert.clone()));
         Some(alert)
+    }
+
+    /// Recharge des alertes enregistrées (historique sur disque), avant que les détecteurs ne
+    /// démarrent et sans rien diffuser. `alerts` est dans l'ordre chronologique ; `next_id` est le
+    /// prochain identifiant d'après l'historique, pour qu'un identifiant ne soit jamais réutilisé.
+    /// Les répétitions d'une alerte rechargée lui sont fusionnées comme si l'agent n'avait pas redémarré.
+    pub fn restore(&self, alerts: Vec<Alert>, next_id: u64) {
+        let mut inner = self.inner.lock();
+        for mut a in alerts {
+            // La file du LLM était en mémoire : une analyse interrompue par l'arrêt ne reprendra pas.
+            if a.triage == TriageStatus::Pending {
+                a.triage = TriageStatus::None;
+            }
+            inner.by_fingerprint.insert(a.fingerprint.clone(), a.id);
+            inner.alerts.push_back(a);
+        }
+        inner.evict(self.capacity);
+        self.next_id.fetch_max(next_id, Ordering::Relaxed);
     }
 
     /// Modifie une alerte existante (statut de triage, analyse…) et diffuse la mise à jour.
@@ -435,6 +460,40 @@ mod tests {
         assert!(store.push(mk(t)).is_some());
         assert!(store.push(mk(t + chrono::Duration::seconds(120))).is_some());
         assert_eq!(store.list(10).len(), 2);
+    }
+
+    // Alertes rechargées : identifiants poursuivis, analyse interrompue remise à « non analysée »,
+    // capacité respectée, et une répétition fusionnée à l'alerte rechargée.
+    #[test]
+    fn restore_continues_ids_and_merges_repeats() {
+        let store = AlertStore::new(2, 300);
+        let t = Utc::now();
+        let mk = |id, src: &str| {
+            let mut a = Alert::new(AlertKind::PortScan, Severity::Medium, AlertSource::Network, t, "scan").src(src);
+            a.id = id;
+            a.fingerprint = a.effective_fingerprint();
+            a.triage = TriageStatus::Pending;
+            a
+        };
+        store.restore(vec![mk(3, "10.0.0.1"), mk(5, "10.0.0.2"), mk(8, "10.0.0.3")], 12);
+        let list = store.list(10);
+        assert_eq!(list.iter().map(|a| a.id).collect::<Vec<_>>(), vec![8, 5]);
+        assert!(list.iter().all(|a| a.triage == TriageStatus::None));
+
+        let repeat = Alert::new(AlertKind::PortScan, Severity::High, AlertSource::Network, t, "scan").src("10.0.0.3");
+        assert!(store.push(repeat).is_none());
+        assert_eq!(store.get(8).unwrap().count, 2);
+        let fresh = Alert::new(AlertKind::PortScan, Severity::Medium, AlertSource::Network, t, "scan").src("10.0.0.9");
+        assert_eq!(store.push(fresh).unwrap().id, 12);
+    }
+
+    // Sans historique, rien ne change : les identifiants commencent à 1.
+    #[test]
+    fn restore_empty_keeps_first_id() {
+        let store = AlertStore::new(10, 300);
+        store.restore(Vec::new(), 1);
+        let a = Alert::new(AlertKind::PortScan, Severity::Medium, AlertSource::Network, Utc::now(), "scan");
+        assert_eq!(store.push(a).unwrap().id, 1);
     }
 
     // Le port est retiré des adresses IPv4, jamais d'une IPv6.

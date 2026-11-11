@@ -5,6 +5,8 @@
 //! ```text
 //! capture (thread) ──PacketMeta──► run_engine ──┐
 //! logs (tâche tokio) ───────────────────────────┼──► AlertSink ──► AlertStore ──► dashboard (SSE)
+//!                                               │        │          ├──► notifications
+//!                                               │        │          └──► historique (SQLite)
 //!                                               │        └──► file de triage ──► LLM
 //! ```
 //!
@@ -18,6 +20,7 @@ mod banner;
 mod capture;
 mod config;
 mod detect;
+mod history;
 mod llm;
 mod logs;
 mod names;
@@ -42,8 +45,12 @@ use crate::{
     capture::PacketMeta,
     config::{AnomalyMode, Config},
     detect::Engine,
+    history::History,
     stats::Stats,
 };
+
+/// Nombre d'alertes gardées en mémoire (dashboard, API), et rechargées depuis l'historique au démarrage.
+const STORE_CAPACITY: usize = 5000;
 
 // Arguments de la ligne de commande, analysés par clap à partir de ces structures.
 // Les commentaires `///` des champs deviennent le texte d'aide de `cyward --help` : on n'y
@@ -181,9 +188,15 @@ fn banner_info(cfg: &Config, capture: String, baseline: Option<&Baseline>) -> Ve
             format!("{mode} · {model}")
         }
     };
+    // Ex. « /var/lib/cyward/alerts.db (90 j, 100000 max) ».
+    let history = if cfg.history.path.is_empty() {
+        "en mémoire".to_string()
+    } else {
+        format!("{} ({} j, {} max)", cfg.history.path, cfg.history.retention_days, cfg.history.max_alerts)
+    };
     // Ex. « 2 canal(aux) » ; les adresses ne sont pas affichées, car elles peuvent contenir un secret.
     let notifications = if cfg.notify.enabled { format!("{} canal(aux)", cfg.notify.channels.len()) } else { "désactivées".to_string() };
-    vec![("Dashboard", dashboard), ("Capture", capture), ("Logs", logs), ("Modèle IA", model), ("Normalité", normality), ("Notifications", notifications)]
+    vec![("Dashboard", dashboard), ("Capture", capture), ("Logs", logs), ("Modèle IA", model), ("Normalité", normality), ("Historique", history), ("Notifications", notifications)]
 }
 
 /// Ouvre l'apprentissage du comportement normal s'il est activé (et recharge son état disque).
@@ -194,12 +207,15 @@ fn open_baseline(cfg: &Config) -> Result<Option<Arc<Baseline>>> {
     Ok(Some(Arc::new(Baseline::open(cfg.detection.anomaly.clone())?)))
 }
 
-/// Démarre la partie commune à `run` et `replay --serve` : stockage des alertes,
-/// worker LLM (si activé), entraîneur du comportement normal (si activé) et serveur web.
-/// Renvoie le point d'entrée des alertes.
-fn start_pipeline(cfg: &Config, stats: &Arc<Stats>, baseline: Option<Arc<Baseline>>) -> Result<AlertSink> {
+/// Démarre la partie commune à `run` et `replay --serve` : stockage des alertes, historique
+/// sur disque, worker LLM, entraîneur du comportement normal, notifications (chacun s'il est
+/// activé) et serveur web. Renvoie le point d'entrée des alertes, et l'historique pour la
+/// dernière écriture à l'arrêt.
+fn start_pipeline(cfg: &Config, stats: &Arc<Stats>, baseline: Option<Arc<Baseline>>) -> Result<(AlertSink, Option<History>)> {
     *stats.started_at.lock() = Some(chrono::Utc::now());
-    let store = Arc::new(AlertStore::new(5000, cfg.detection.alert_cooldown_secs));
+    let store = Arc::new(AlertStore::new(STORE_CAPACITY, cfg.detection.alert_cooldown_secs));
+    // En premier : les alertes rechargées sont dans le store avant que le dashboard ne les serve.
+    let history = if cfg.history.path.is_empty() { None } else { Some(history::spawn(cfg.history.clone(), store.clone(), STORE_CAPACITY)?) };
     // `triage` est l'émetteur de la file vers le LLM ; None si le LLM est désactivé.
     let triage = if cfg.llm.enabled { Some(llm::spawn(cfg.llm.clone(), store.clone(), stats.clone())?) } else { None };
     let sink = AlertSink::new(store.clone(), triage, cfg.llm.min_severity);
@@ -221,13 +237,13 @@ fn start_pipeline(cfg: &Config, stats: &Arc<Stats>, baseline: Option<Arc<Baselin
             tracing::error!("dashboard arrêté : {e:#}");
         }
     });
-    Ok(sink)
+    Ok((sink, history))
 }
 
 /// Mode surveillance continue (`cyward run`).
 async fn run(cfg: Config, baseline: Option<Arc<Baseline>>) -> Result<()> {
     let stats = Arc::new(Stats::default());
-    let sink = start_pipeline(&cfg, &stats, baseline.clone())?;
+    let (sink, history) = start_pipeline(&cfg, &stats, baseline.clone())?;
 
     if cfg.capture.enabled {
         let iface = capture::pick_interface(&cfg.capture.interface)?;
@@ -258,6 +274,10 @@ async fn run(cfg: Config, baseline: Option<Arc<Baseline>>) -> Result<()> {
     // Toutes les tâches tournent en arrière-plan ; on attend simplement Ctrl+C (ou SIGINT).
     tokio::signal::ctrl_c().await?;
     tracing::info!("arrêt");
+    // Écriture finale : les alertes modifiées depuis le dernier lot (5 s au plus).
+    if let Some(h) = &history {
+        h.flush().await;
+    }
     // Sauvegarde finale : les fenêtres apprises depuis la dernière sauvegarde périodique.
     if let Some(b) = &baseline {
         b.save()?;
@@ -269,6 +289,9 @@ async fn run(cfg: Config, baseline: Option<Arc<Baseline>>) -> Result<()> {
 async fn replay(mut cfg: Config, file: PathBuf, serve: bool) -> Result<()> {
     // Sans --serve, personne ne verrait les analyses : inutile de solliciter le LLM.
     cfg.llm.enabled &= serve;
+    // Les alertes d'un pcap (dates d'origine, attaques simulées) n'ont rien à faire dans
+    // l'historique de la surveillance : le rejeu reste en mémoire.
+    cfg.history.path.clear();
     let stats = Arc::new(Stats::default());
     // Le nom du fichier s'affiche à la place de l'interface dans le dashboard.
     *stats.interface.lock() = file.file_name().map(|n| n.to_string_lossy().into_owned());
@@ -281,7 +304,7 @@ async fn replay(mut cfg: Config, file: PathBuf, serve: bool) -> Result<()> {
         cfg.logs.enabled = false;
         let source = format!("rejeu de {}", file.display());
         print!("{}", banner::render(&banner_info(&cfg, source, baseline.as_deref()), banner::use_color()));
-        start_pipeline(&cfg, &stats, baseline.clone())?
+        start_pipeline(&cfg, &stats, baseline.clone())?.0
     } else {
         // Store seul, sans dashboard ni LLM, assez grand pour garder toutes les alertes du fichier.
         AlertSink::new(Arc::new(AlertStore::new(100_000, cfg.detection.alert_cooldown_secs)), None, cfg.llm.min_severity)
@@ -366,6 +389,16 @@ mod tests {
         assert_eq!(value(&info, "Logs"), "journald");
         assert_eq!(value(&info, "Modèle IA"), Config::default().llm.model);
         assert_eq!(value(&info, "Normalité"), "désactivée");
+        assert_eq!(value(&info, "Historique"), "en mémoire");
+    }
+
+    // Historique activé : le fichier et ses limites apparaissent dans le résumé.
+    #[test]
+    fn banner_info_shows_history() {
+        let mut cfg = Config::default();
+        cfg.history.path = "/var/lib/cyward/alerts.db".into();
+        let info = banner_info(&cfg, "eth0".into(), None);
+        assert_eq!(value(&info, "Historique"), "/var/lib/cyward/alerts.db (90 j, 100000 max)");
     }
 
     // Étages désactivés, jeton défini, fichiers de logs : le résumé le reflète, sans jamais

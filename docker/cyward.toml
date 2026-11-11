@@ -56,3 +56,9 @@ dashboard_url = ""
 # url = "http://127.0.0.1:8090"
 # topic = "cyward"
 # token = ""
+
+[history]
+# Historique des alertes (SQLite), dans le volume Docker « cyward-data » comme l'apprentissage.
+path = "/var/lib/cyward/alerts.db"
+retention_days = 90.0
+max_alerts = 100000

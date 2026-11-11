@@ -142,3 +142,12 @@ dashboard_url = ""
 # type = "webhook"
 # url = "https://exemple/webhook"
 # headers = { Authorization = "Bearer …" }
+
+# Historique des alertes dans une base SQLite : les alertes survivent au redémarrage.
+[history]
+# Fichier de la base (créé au besoin). Vide = alertes en mémoire seulement, perdues à l'arrêt.
+path = ""
+# Conservation après la dernière occurrence d'une alerte, en jours.
+retention_days = 90.0
+# Plafond du nombre d'alertes en base (garde-fou contre une inondation, ~1 à 2 Ko par alerte).
+max_alerts = 100000
