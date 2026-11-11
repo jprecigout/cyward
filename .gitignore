@@ -1,3 +1,6 @@
 target/
 *.pcap
 /cyward.toml
+# Configuration Docker locale (secrets : jetons ntfy, web.token…), jamais versionnée.
+compose.override.yaml
+docker/cyward.local.toml

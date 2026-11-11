@@ -778,6 +778,13 @@ Le premier lancement télécharge environ 5 Go de modèle. Le dashboard est ensu
 - **Droits minimaux** : toutes les capacités sont retirées sauf `NET_RAW` et `NET_ADMIN`. S'y ajoutent `no-new-privileges` et un système de fichiers en lecture seule.
 - **Logs de l'hôte** : `/var/log/journal` et `/etc/machine-id` sont montés en lecture seule. Le `machine-id` permet à `journalctl` de reconnaître le journal de l'hôte comme le sien. Les systèmes sans journal persistant (pas de `/var/log/journal`) ne sont pas couverts.
 - **Configuration** : [`docker/cyward.toml`](docker/cyward.toml), monté dans `/etc/cyward/cyward.toml`. Une modification se prend en compte avec `docker compose restart cyward`.
+- **Secrets (jeton ntfy, `web.token`…)** : ne jamais les écrire dans `docker/cyward.toml`, qui est versionné. Copie-le en `docker/cyward.local.toml` et crée un `compose.override.yaml`, chargé automatiquement par `docker compose`, qui monte cette copie à sa place. Les deux fichiers sont ignorés par git :
+  ```yaml
+  services:
+    cyward:
+      volumes:
+        - ./docker/cyward.local.toml:/etc/cyward/cyward.toml:ro
+  ```
 - **Apprentissage du comportement normal** : activé dans l'image, en mode observation. Ses données sont dans le volume `cyward-data` (`/var/lib/cyward`), seul emplacement accessible en écriture. Définir `web.token` pour pouvoir répondre et valider depuis le dashboard.
 - **Modèle** : pour en changer, modifie `llm.model` dans `docker/cyward.toml` **et** définis `CYWARD_MODEL` (dans `.env` ou l'environnement) avec la même valeur.
 - **GPU NVIDIA** : décommente le bloc `deploy` du service `ollama` (nécessite `nvidia-container-toolkit`).
