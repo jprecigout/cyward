@@ -1383,14 +1383,16 @@ Un outil de détection est une cible de choix : il voit tout le réseau. Plusieu
 
 ## 16. Pistes d'évolution
 
-- Recherche dans l'historique des alertes depuis le dashboard (par hôte, type, période).
-- Export vers un SIEM : fichier JSON lignes, syslog, Elasticsearch, Loki, Wazuh.
-- Notifications pour les alertes critiques (ntfy, Discord, Slack, e-mail).
-- Ingestion des alertes Suricata (`eve.json`) et des logs Zeek, pour combiner signatures et comportement.
-- Réponse active optionnelle et validée par un humain : blocage d'IP via nftables.
-- Modèle d'anomalies léger (Isolation Forest en ONNX) entraîné sur des jeux comme CIC-IDS2017.
-- Détections supplémentaires : ARP spoofing, nouveaux appareils sur le réseau, connexions vers des IP de listes de menaces (abuse.ch, Spamhaus), TLS/JA3/JA4.
-- Capture haute performance avec AF_XDP ou eBPF.
+- **Historique** : recherche dans les alertes enregistrées depuis le dashboard (par hôte, type, période), au-delà des 5 000 gardées en mémoire.
+- **Export vers un SIEM** dans des formats natifs : syslog, fichier JSON lignes, Loki, Elasticsearch, Wazuh. Le webhook des notifications transmet déjà l'alerte complète, mais seulement pour les alertes notifiées.
+- **Notifications par e-mail** (SMTP), en plus de ntfy et du webhook.
+- **Ingestion des alertes Suricata** (`eve.json`) et des logs Zeek, pour combiner signatures et comportement.
+- **Réponse active** optionnelle et validée par un humain : blocage d'IP via nftables.
+- **Apprentissage** : persister l'état du détecteur de volume, qui repart de zéro à chaque redémarrage, et le modèle candidat en attente de validation.
+- **Détections supplémentaires** : ARP spoofing, nouveaux appareils sur le réseau, connexions vers des IP de listes de menaces (abuse.ch, Spamhaus), TLS/JA3/JA4.
+- **Capture haute performance** avec AF_XDP ou eBPF.
+
+Les notifications (ntfy, webhook) et l'apprentissage du comportement normal par Isolation Forest, autrefois dans cette liste, sont implémentés : voir `[notify]` (section 7) et la section 3.9.
 
 ---
 
