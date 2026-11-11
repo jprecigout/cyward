@@ -57,6 +57,7 @@ flowchart TB
     FILE[["File de triage<br/>sévérité ≥ seuil"]]
     LLM["Étage 2 : LLM cyber local<br/>Ollama, llama.cpp, vLLM…<br/>verdict, MITRE ATT&CK, actions"]
     WEB["Dashboard web<br/>axum, API, flux SSE"]
+    HIST[("Historique SQLite<br/>optionnel")]
     USER(["Analyste<br/>dans le navigateur"])
 
     NET --> CAP --> PAR --> DET --> SINK
@@ -67,6 +68,7 @@ flowchart TB
     SINK -- "alerte nouvelle et assez grave" --> FILE --> LLM
     LLM -- "analyse ajoutée à l'alerte" --> STORE
     STORE -- "nouvelles alertes et mises à jour" --> WEB --> USER
+    STORE -- "écrit par lots" --> HIST
 
     classDef etage2 fill:#1f6feb22,stroke:#58a6ff
     class LLM etage2
@@ -240,30 +242,32 @@ Autre principe de découpage : **la logique de décision ne fait pas d'entrées/
 
 Cyward est construit sur **9 design patterns**. Le schéma montre où chacun intervient dans le parcours d'une donnée, du paquet ou de la ligne de log jusqu'au navigateur et au LLM. Chaque pattern est ensuite détaillé avec ses rôles, le vrai code et la façon de s'en servir.
 
-```
- ┌────────────── ⑧ Racine de composition : main.rs crée et relie tous les composants ──────────────┐
- │                                                                                                 │
- │  interface réseau ─► capture ══⑤══► Engine ──①──► PortScan, BruteForce, SynFlood,               │
- │                     (thread)                        Beaconing, Volume, Dns, HostAnomaly         │
- │                                                           │ Alert::new(..).src(..)… ②           │
- │  journalctl, tail ◄──⑦── supervise ══⑤══► LogAnalyzer ───┤                                      │
- │                                                           ▼                                     │
- │                                                     AlertSink ③ ══⑤══► worker LLM               │
- │                                                           │                                     │
- │                                                           ▼                                     │
- │  SQLite ◄── AlertRepository ⑨ ◄══⑤══ history ◄──④── AlertStore ──④──► clients SSE du dashboard  │
- │                                                                          ▲                      │
- │                                                     web.rs : ⑥ middlewares (accès, écriture)    │
- │                                                                                                 │
- │  HostAnomaly ──► Baseline ③ ──► Storage ⑨ (disque)     trainer ══⑤══► apprentissages            │
- │                      ▲                                                                          │
- │                      └── web.rs : « est-ce normal ? », validation du diff, retour arrière       │
- │                                                                                                 │
- └─────────────────────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph ROOT["⑧ Racine de composition : main.rs crée et relie tous les composants"]
+        NIC["interface réseau"] --> CAP["capture<br/>(thread)"]
+        CAP == "⑤" ==> ENG["Engine"]
+        ENG -- "①" --> DETS["PortScan, BruteForce, SynFlood,<br/>Beaconing, Volume, Dns, HostAnomaly"]
+        SUP["supervise"] -- "⑦" --> SRC["journalctl, tail"]
+        SUP == "⑤" ==> LA["LogAnalyzer"]
+        DETS -- "Alert::new(..).src(..)… ②" --> SINK["AlertSink ③"]
+        LA -- "②" --> SINK
+        SINK == "⑤" ==> LLM["worker LLM"]
+        SINK --> STORE["AlertStore"]
+        STORE -- "④" --> SSE["clients SSE du dashboard"]
+        STORE -- "④" --> NOTIF["notify"]
+        STORE -- "④" --> HIST["history"]
+        HIST == "⑤" ==> REPO["AlertRepository ⑨<br/>(SQLite)"]
+        MW["web.rs : ⑥ middlewares<br/>(accès, écriture)"] --> SSE
 
- ① Strategy  ② Builder  ③ Façade  ④ Observer  ⑤ Producteur/consommateur (══ canal)
- ⑥ Middleware  ⑦ Superviseur  ⑧ Racine de composition  ⑨ Repository
+        DETS -- "HostAnomaly" --> BL["Baseline ③"]
+        BL --> STO["Storage ⑨<br/>(disque)"]
+        TR["trainer"] == "⑤ apprentissages" ==> BL
+        WQ["web.rs : « est-ce normal ? »,<br/>validation du diff, retour arrière"] --> BL
+    end
 ```
+
+① Strategy · ② Builder · ③ Façade · ④ Observer · ⑤ Producteur/consommateur (flèche épaisse = canal) · ⑥ Middleware · ⑦ Superviseur · ⑧ Racine de composition · ⑨ Repository
 
 | # | Pattern | Où | Problème résolu dans Cyward |
 |---|---|---|---|

@@ -54,6 +54,8 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
 
 Le reste du README suit la même règle : détecteurs (section 3), configuration (section 7), API et types d'alerte (section 8), résultat du rejeu (section 11). Une modification dont le README n'est pas à jour n'est pas terminée.
 
+**Diagrammes en Mermaid (obligatoire)** : tout diagramme d'un fichier Markdown (README, `doc/`, CLAUDE.md, skills) s'écrit dans un bloc ` ```mermaid ` (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`…), jamais en art ASCII. Ne sont pas des diagrammes, et restent en texte : les arborescences de fichiers et les exemples de sortie du terminal. Un diagramme ASCII existant qu'on modifie est converti en Mermaid dans la même modification. Les commentaires `//!` du code Rust gardent un schéma texte court, car rustdoc n'affiche pas Mermaid.
+
 **Commentaires** (en français), au niveau de densité du code existant :
 - un en-tête `//!` par module, qui explique son rôle et sa place dans le pipeline ;
 - un `///` sur chaque structure, champ, fonction et constante, avec l'unité des valeurs (secondes, octets…) ;
@@ -125,17 +127,22 @@ La capture live (`cyward run`) exige `sudo setcap cap_net_raw,cap_net_admin=eip 
 
 Pipeline assemblé dans `main.rs` :
 
-```
-capture.rs (thread bloquant AF_PACKET, ou rejeu pcap) ──mpsc<PacketMeta>──► run_engine ─► detect::Engine ─┐
-logs.rs (journalctl -f -o json / tail -F, sous-processus relancés) ─► LogAnalyzer ──────────────────────────┤
-                                                                                                          ▼
-                                     AlertSink::emit ─► AlertStore (dédoublonnage + broadcast) ─► web.rs (SSE)
-                                            └─ si sévérité ≥ llm.min_severity ─► file mpsc<u64> ─► llm.rs
-                                     AlertStore ─broadcast─► notify.rs (décision) ─mpsc─► ntfy, webhook
-                                     AlertStore ─broadcast─► history.rs (lots) ─mpsc─► thread SQLite (history.path)
+```mermaid
+flowchart LR
+    CAP["capture.rs<br/>thread bloquant AF_PACKET, ou rejeu pcap"] -- "mpsc#lt;PacketMeta#gt;" --> RE["run_engine"] --> ENG["detect::Engine"]
+    LOGS["logs.rs<br/>journalctl -f -o json / tail -F<br/>sous-processus relancés"] --> LA["LogAnalyzer"]
+    ENG --> SINK["AlertSink::emit"]
+    LA --> SINK
+    SINK --> STORE["AlertStore<br/>dédoublonnage + broadcast"]
+    SINK -- "si sévérité ≥ llm.min_severity<br/>file mpsc#lt;u64#gt;" --> LLM["llm.rs"]
+    STORE -- "broadcast" --> WEB["web.rs (SSE)"]
+    STORE -- "broadcast" --> NOTIF["notify.rs (décision)"] -- "mpsc" --> CH["ntfy, webhook"]
+    STORE -- "broadcast" --> HIST["history.rs (lots)"] -- "mpsc" --> SQL["thread SQLite<br/>(history.path)"]
 
-detect/anomaly.rs (HostAnomaly) ─► anomaly::Baseline ◄─ anomaly::trainer (périodique) ◄─ web.rs (réponses, validation)
-                                         └─► anomaly::Storage (data_dir)
+    HA["detect/anomaly.rs<br/>(HostAnomaly)"] --> BL["anomaly::Baseline"]
+    TR["anomaly::trainer<br/>(périodique)"] --> BL
+    WEBR["web.rs<br/>(réponses, validation)"] --> BL
+    BL --> STOR["anomaly::Storage<br/>(data_dir)"]
 ```
 
 **Apprentissage du comportement normal** (`src/anomaly/`, désactivé par défaut) : conception et garde-fous dans `doc/conception-normalite.md`, à lire avant d'y toucher. `baseline.rs` porte la Façade et les garde-fous ; `baseline/samples.rs` le journal des échantillons (événements, rejeu, rétention, compaction) ; `baseline/status.rs` les vues renvoyées à l'API ; l'explication des anomalies (`explain`) est dans `features.rs`. Invariants à préserver :
