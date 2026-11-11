@@ -389,6 +389,26 @@ impl AlertSink {
     }
 }
 
+/// Retire le port d'une adresse « hôte:port » telle que les détecteurs l'écrivent dans
+/// `src`/`dst` (« 10.0.0.1:22 » → « 10.0.0.1 »). Les IPv6, à plusieurs « : », sont laissées
+/// intactes. Sert partout où l'on regroupe des alertes par machine (contexte du LLM,
+/// fenêtres exclues de l'apprentissage) : une seule définition, pour un regroupement identique.
+pub fn host_part(s: &str) -> &str {
+    if s.matches(':').count() == 1 { s.split(':').next().unwrap_or(s) } else { s }
+}
+
+/// Formate un nombre d'octets en unité lisible (o, Ko, Mo…), en base 1024, pour les textes d'alerte.
+pub fn human_bytes(b: f64) -> String {
+    const UNITS: [&str; 5] = ["o", "Ko", "Mo", "Go", "To"];
+    let mut v = b;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    format!("{v:.1} {}", UNITS[i])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +435,21 @@ mod tests {
         assert!(store.push(mk(t)).is_some());
         assert!(store.push(mk(t + chrono::Duration::seconds(120))).is_some());
         assert_eq!(store.list(10).len(), 2);
+    }
+
+    // Le port est retiré des adresses IPv4, jamais d'une IPv6.
+    #[test]
+    fn host_part_strips_port_only_for_ipv4() {
+        assert_eq!(host_part("10.0.0.1:22"), "10.0.0.1");
+        assert_eq!(host_part("10.0.0.1"), "10.0.0.1");
+        assert_eq!(host_part("fe80::1"), "fe80::1");
+    }
+
+    // Les octets sont affichés dans l'unité qui convient, en base 1024.
+    #[test]
+    fn human_bytes_picks_unit() {
+        assert_eq!(human_bytes(512.0), "512.0 o");
+        assert_eq!(human_bytes(1536.0), "1.5 Ko");
+        assert_eq!(human_bytes(85.0 * 1024.0 * 1024.0), "85.0 Mo");
     }
 }

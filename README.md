@@ -1114,7 +1114,7 @@ Avec `AmbientCapabilities`, le `setcap` sur le binaire n'est pas nécessaire.
 cargo test
 ```
 
-78 tests couvrent :
+79 tests couvrent :
 - le parsing des paquets et du DNS ;
 - chaque détecteur, cas positifs et négatifs (un scan lent ou un trafic irrégulier ne doivent pas déclencher), et le plafond mémoire des détecteurs exposés aux adresses usurpées ;
 - les règles de logs ;

@@ -8,6 +8,8 @@ use std::{collections::HashSet, net::IpAddr};
 
 use serde::{Deserialize, Serialize};
 
+use crate::alert::human_bytes;
+
 /// Nombre de caractéristiques par échantillon.
 pub const N: usize = 12;
 
@@ -97,18 +99,6 @@ pub fn display(i: usize, v: f64) -> String {
         9 => format!("{x:.2} bits"),
         _ => format!("{:.0}", x),
     }
-}
-
-/// Formate un nombre d'octets en unité lisible (o, Ko, Mo…), en base 1024.
-pub fn human_bytes(b: f64) -> String {
-    const UNITS: [&str; 5] = ["o", "Ko", "Mo", "Go", "To"];
-    let mut v = b;
-    let mut i = 0;
-    while v >= 1024.0 && i < UNITS.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    format!("{v:.1} {}", UNITS[i])
 }
 
 /// Statistiques d'une caractéristique sur un ensemble d'échantillons (valeurs transformées).

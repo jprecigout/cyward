@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::{
-    alert::{Alert, AlertStore, Analysis, TriageStatus},
+    alert::{Alert, AlertStore, Analysis, TriageStatus, host_part},
     config::LlmConfig,
     stats::Stats,
 };
@@ -194,12 +194,6 @@ impl Triage {
     }
 }
 
-/// Retire le port d'une adresse « hôte:port ».
-fn host_part(s: &str) -> &str {
-    // "10.0.0.1:22" -> "10.0.0.1" ; on laisse les IPv6 (plusieurs ':') intactes
-    if s.matches(':').count() == 1 { s.split(':').next().unwrap_or(s) } else { s }
-}
-
 /// Message système : rôle du modèle, règles de raisonnement et format de réponse imposé.
 fn system_prompt(language: &str) -> String {
     format!(
@@ -291,11 +285,5 @@ mod tests {
         assert!((a.confidence - 0.85).abs() < 1e-9);
         assert_eq!(a.mitre, vec!["T1110"]);
         assert_eq!(a.recommendations.len(), 1);
-    }
-
-    #[test]
-    fn host_part_strips_port_only_for_ipv4() {
-        assert_eq!(host_part("10.0.0.1:22"), "10.0.0.1");
-        assert_eq!(host_part("fe80::1"), "fe80::1");
     }
 }

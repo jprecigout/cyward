@@ -7,8 +7,7 @@ use serde_json::json;
 
 use super::{Detector, ts_to_dt};
 use crate::{
-    alert::{Alert, AlertKind, AlertSource, Severity},
-    anomaly::features::human_bytes,
+    alert::{Alert, AlertKind, AlertSource, Severity, human_bytes},
     capture::PacketMeta,
     config::{DetectionConfig, VolumeConfig},
 };

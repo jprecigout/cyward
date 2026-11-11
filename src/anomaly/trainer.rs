@@ -20,7 +20,7 @@ use super::{
     baseline::{Baseline, TrainOutcome},
     model::Sample,
 };
-use crate::alert::{Alert, AlertKind, AlertSink, AlertSource, Severity};
+use crate::alert::{Alert, AlertKind, AlertSink, AlertSource, Severity, host_part};
 
 /// Intervalle entre deux vérifications (sauvegarde + apprentissage éventuel).
 const CHECK_EVERY: Duration = Duration::from_secs(600);
@@ -103,11 +103,6 @@ pub fn tainted_by_rules(alerts: &[Alert]) -> impl Fn(&Sample) -> bool + Send + '
         }
     }
     move |s: &Sample| periods.get(&s.host).is_some_and(|p| p.iter().any(|&(from, to)| from <= s.end && to >= s.start))
-}
-
-/// Retire le port d'une adresse « hôte:port » (les IPv6, à plusieurs « : », sont laissées intactes).
-fn host_part(s: &str) -> &str {
-    if s.matches(':').count() == 1 { s.split(':').next().unwrap_or(s) } else { s }
 }
 
 #[cfg(test)]
