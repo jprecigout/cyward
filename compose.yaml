@@ -1,0 +1,74 @@
+# Cyward + Ollama avec le modèle Foundation-Sec-8B-Instruct.
+#
+#   docker compose up -d --build     # premier lancement : télécharge ~5 Go de modèle
+#   docker compose logs -f cyward
+#   → dashboard sur http://127.0.0.1:8080
+#
+# Linux uniquement : la capture repose sur le réseau de l'hôte (network_mode: host),
+# qui n'a pas le même sens sous Docker Desktop (macOS/Windows).
+
+name: cyward
+
+x-ollama-image: &ollama-image ollama/ollama:0.40.15
+
+services:
+  ollama:
+    image: *ollama-image
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    # GPU NVIDIA (nécessite nvidia-container-toolkit) : décommenter.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # Télécharge le modèle s'il est absent, puis s'arrête. Quasi instantané les fois suivantes.
+  ollama-pull:
+    image: *ollama-image
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["ollama", "pull"]
+    command: ["${CYWARD_MODEL:-hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  cyward:
+    build: .
+    image: cyward:latest
+    restart: unless-stopped
+    # Indispensable pour voir le trafic des interfaces de l'hôte.
+    network_mode: host
+    # Seuls les droits de capture sont accordés.
+    cap_drop: [ALL]
+    cap_add: [NET_RAW, NET_ADMIN]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./docker/cyward.toml:/etc/cyward/cyward.toml:ro
+      # Journal systemd de l'hôte. Le machine-id permet à journalctl de retrouver ce journal.
+      - /var/log/journal:/var/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+    environment:
+      RUST_LOG: info
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+
+volumes:
+  ollama:

@@ -1,0 +1,83 @@
+# Configuration de Cyward. Toutes les clés sont optionnelles : les valeurs indiquées sont celles par défaut.
+
+[capture]
+enabled = true
+# Interface à écouter. Vide = première interface active non-loopback. Voir `cyward interfaces`.
+interface = ""
+promiscuous = true
+queue_size = 65536
+
+[logs]
+enabled = true
+# Lecture du journal systemd (l'utilisateur doit être dans le groupe systemd-journal ou adm).
+journald = true
+# Fichiers texte à suivre. Ne pas mettre /var/log/auth.log si journald est activé : les lignes seraient comptées deux fois.
+files = []
+
+[detection]
+# IP jamais signalées comme source : scanner de vulnérabilités interne, supervision…
+whitelist = []
+local_networks = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", "fe80::/10"]
+alert_cooldown_secs = 300
+
+[detection.portscan]
+window_secs = 60.0
+ports_threshold = 25
+hosts_threshold = 20
+
+[detection.bruteforce]
+window_secs = 60.0
+threshold = 20
+ports = [21, 22, 23, 25, 110, 143, 445, 587, 993, 995, 1433, 3306, 3389, 5432, 5900, 6379]
+
+[detection.synflood]
+window_secs = 10.0
+threshold = 3000
+
+[detection.beacon]
+min_samples = 8
+max_jitter = 0.12
+min_interval_secs = 5.0
+ignore_ports = [53, 123, 5353]
+
+[detection.volume]
+bucket_secs = 60.0
+warmup_buckets = 15
+zscore = 4.0
+min_bytes = 50000000
+
+[detection.dns]
+max_name_len = 80
+min_label_len = 25
+entropy_threshold = 3.8
+window_secs = 300.0
+unique_subdomains_threshold = 150
+ignore_suffixes = ["in-addr.arpa", "ip6.arpa", "local"]
+
+[detection.auth]
+window_secs = 300
+failures_threshold = 6
+
+# Règles personnalisées sur les logs. Un groupe nommé `ip` devient la source de l'alerte.
+# [[detection.custom_log_rules]]
+# name = "wordpress-login"
+# pattern = '(?P<ip>\d+\.\d+\.\d+\.\d+) .*"POST /wp-login\.php'
+# severity = "low"
+# title = "Tentative de connexion WordPress"
+
+[llm]
+enabled = true
+# Toute API compatible OpenAI : Ollama, llama.cpp (llama-server), vLLM…
+base_url = "http://127.0.0.1:11434/v1"
+model = "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
+api_key = ""
+timeout_secs = 300
+# info | low | medium | high | critical
+min_severity = "medium"
+language = "français"
+queue_size = 32
+
+[web]
+listen = "127.0.0.1:8080"
+# Obligatoire si vous exposez le dashboard au-delà de localhost : il affiche la topologie de votre réseau.
+token = ""

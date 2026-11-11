@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cyward</title>
+<style>
+  /* Palette (thème sombre). Chaque sévérité a sa couleur, reprise dans les cartes via la variable --c. */
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel-2: #1c2330; --border: #2a3240;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --info: #6e7681; --low: #3fb950; --medium: #d29922; --high: #f0883e; --critical: #f85149;
+    --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  /* Bandeau fixe en haut de page : nom, indicateur de connexion et pastilles de statistiques. */
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 2; flex-wrap: wrap; }
+  .brand { font-weight: 700; font-size: 17px; letter-spacing: .3px; display: flex; align-items: center; gap: 8px; }
+  .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--low); box-shadow: 0 0 8px var(--low); }
+  .brand .dot.off { background: var(--critical); box-shadow: 0 0 8px var(--critical); }
+  .pills { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+  .pill { background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .pill b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pill.ok b { color: var(--low); } .pill.ko b { color: var(--critical); }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  /* Compteurs par sévérité, cliquables pour filtrer la liste. */
+  .counters { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 18px; }
+  .counter { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; cursor: pointer; border-top: 3px solid var(--c); transition: background .15s; }
+  .counter:hover { background: var(--panel-2); }
+  .counter.active { outline: 2px solid var(--c); }
+  .counter .n { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .counter .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .6px; }
+  .toolbar { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .toolbar input, .toolbar select { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font: inherit; }
+  .toolbar input { flex: 1; min-width: 200px; }
+  /* Liste des alertes. Une carte = une ligne résumée (.row) + un détail dépliable (.details). */
+  .alerts { display: flex; flex-direction: column; gap: 8px; }
+  .alert { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--c); border-radius: 8px; overflow: hidden; }
+  /* Bref clignotement d'une alerte qui vient d'arriver. */
+  .alert.fresh { animation: flash 1.6s ease-out; }
+  @keyframes flash { from { background: color-mix(in srgb, var(--c) 30%, var(--panel)); } to { background: var(--panel); } }
+  .row { display: grid; grid-template-columns: 92px 1fr auto auto; gap: 12px; align-items: center; padding: 10px 14px; cursor: pointer; }
+  .row:hover { background: var(--panel-2); }
+  .sev { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--c); }
+  .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  /* Badge d'état du triage IA ; la classe ajoutée est le verdict renvoyé par le modèle. */
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+  .badge.malveillant { color: var(--critical); border-color: var(--critical); }
+  .badge.suspect { color: var(--medium); border-color: var(--medium); }
+  .badge.bénin, .badge.benin { color: var(--low); border-color: var(--low); }
+  .badge.pending { color: var(--accent); border-color: var(--accent); }
+  .badge.pending::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); margin-right: 5px; animation: pulse 1s infinite alternate; vertical-align: middle; }
+  @keyframes pulse { to { opacity: .2; } }
+  /* Détail d'une alerte : masqué tant que la carte n'a pas la classe .open. */
+  .details { display: none; border-top: 1px solid var(--border); padding: 14px; gap: 14px; grid-template-columns: 1fr 1fr; }
+  .alert.open .details { display: grid; }
+  .details h4 { margin: 0 0 6px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+  .details p { margin: 0 0 10px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; font-size: 13px; margin-bottom: 10px; }
+  .kv span:nth-child(odd) { color: var(--muted); }
+  .kv span:nth-child(even) { font-family: var(--mono); word-break: break-all; }
+  pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin: 0; font: 12px/1.4 var(--mono); overflow: auto; max-height: 260px; white-space: pre-wrap; word-break: break-all; }
+  /* Encadré de l'analyse IA : jauge de confiance, liens MITRE, recommandations. */
+  .ai { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .conf { height: 6px; border-radius: 3px; background: var(--border); margin: 6px 0 12px; overflow: hidden; }
+  .conf > div { height: 100%; background: var(--accent); }
+  .ai ul, .ai ol { margin: 4px 0 10px; padding-left: 20px; }
+  .mitre a { color: var(--accent); font-family: var(--mono); font-size: 12px; margin-right: 8px; text-decoration: none; }
+  .mitre a:hover { text-decoration: underline; }
+  .empty { text-align: center; color: var(--muted); padding: 60px 20px; border: 1px dashed var(--border); border-radius: 10px; }
+  /* Petits écrans : compteurs sur deux lignes, détail en une colonne. */
+  @media (max-width: 760px) {
+    .counters { grid-template-columns: repeat(3, 1fr); }
+    .row { grid-template-columns: 70px 1fr; }
+    .row .time, .row .badge { grid-column: 2; justify-self: start; }
+    .details { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<!-- Page unique, sans dépendance externe, servie par web.rs et embarquée dans le binaire. -->
+<!-- Le point #live passe au rouge si la connexion SSE est perdue ; #pills est rempli par refreshStats(). -->
+<header>
+  <div class="brand"><span class="dot" id="live"></span>Cyward</div>
+  <div class="pills" id="pills"></div>
+</header>
+<main>
+  <!-- Rempli par renderCounters(). -->
+  <div class="counters" id="counters"></div>
+  <!-- Filtres : chaque modification relance renderAll(). -->
+  <div class="toolbar">
+    <input id="search" type="search" placeholder="Filtrer par IP, titre, type…">
+    <select id="source">
+      <option value="">Toutes les sources</option>
+      <option value="network">Réseau</option>
+      <option value="logs">Logs système</option>
+    </select>
+    <select id="verdict">
+      <option value="">Tous les verdicts</option>
+      <option value="malveillant">Malveillant</option>
+      <option value="suspect">Suspect</option>
+      <option value="bénin">Bénin</option>
+      <option value="pending">Analyse en cours</option>
+    </select>
+  </div>
+  <!-- Remplie par renderAll(), puis mise à jour carte par carte par upsert(). -->
+  <div class="alerts" id="alerts"></div>
+</main>
+<script>
+// Fonctionnement : au chargement, la page ouvre un flux SSE (/api/events). À chaque (re)connexion,
+// elle recharge la liste complète (/api/alerts), puis applique les événements « new » / « update »
+// au fil de l'eau. Les statistiques du bandeau sont relues toutes les 2 s (/api/stats).
+
+// Sévérités dans l'ordre d'affichage des compteurs, et leurs libellés.
+const SEVERITIES = ["critical", "high", "medium", "low", "info"];
+const LABELS = { critical: "Critique", high: "Haute", medium: "Moyenne", low: "Basse", info: "Info" };
+// Jeton éventuel passé dans l'URL de la page (?token=…), réutilisé pour tous les appels à l'API.
+const token = new URLSearchParams(location.search).get("token");
+// Ajoute le jeton à un chemin d'API s'il y en a un.
+const q = (path) => token ? `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : path;
+
+// État de la page : alertes par identifiant, cartes dépliées, filtre de sévérité actif.
+const alerts = new Map();
+const open = new Set();
+let minSeverity = null;
+// Mesure précédente, pour calculer le débit en paquets par seconde.
+let lastPackets = null, lastTime = null;
+
+// Construit le DOM sans innerHTML : les champs viennent du réseau et des logs, donc d'un attaquant potentiel.
+// el("div", { class: "x", onclick: f }, enfant1, [enfant2, enfant3]) : les attributs « on… » deviennent
+// des écouteurs d'événements, les enfants texte sont insérés comme texte (jamais interprétés en HTML),
+// les tableaux sont aplatis et null est ignoré (pratique pour les éléments conditionnels).
+function el(tag, attrs = {}, ...children) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v;
+    else if (k === "style") e.style.cssText = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  for (const c of children.flat()) if (c != null) e.append(c instanceof Node ? c : String(c));
+  return e;
+}
+
+// Formatage des dates, nombres et tailles à la française.
+const fmtTime = (s) => new Date(s).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const fmtNum = (n) => n.toLocaleString("fr-FR");
+const fmtBytes = (b) => { const u = ["o", "Ko", "Mo", "Go", "To"]; let i = 0; while (b >= 1024 && i < 4) { b /= 1024; i++; } return `${b.toFixed(1)} ${u[i]}`; };
+const sevColor = (s) => `var(--${s})`;
+
+// Badge de la ligne d'alerte : état du triage IA, verdict, ou à défaut l'origine de l'alerte.
+function verdictBadge(a) {
+  if (a.triage === "pending") return el("span", { class: "badge pending" }, "IA en attente");
+  if (a.triage === "failed") return el("span", { class: "badge" }, "IA en échec");
+  if (a.analysis) return el("span", { class: `badge ${a.analysis.verdict}` }, `${a.analysis.verdict} · ${Math.round(a.analysis.confidence * 100)} %`);
+  return el("span", { class: "badge" }, a.source === "network" ? "réseau" : "logs");
+}
+
+// Colonne droite du détail : l'analyse du modèle, ou un message expliquant son absence.
+function renderAnalysis(a) {
+  if (!a.analysis) {
+    const msg = a.triage === "pending" ? "En attente du modèle (analyses traitées une par une, ou modèle hors ligne)…"
+      : a.triage === "failed" ? "L'analyse a échoué (voir les logs de l'agent)."
+      : "Non envoyée au modèle (sévérité inférieure au seuil).";
+    return el("div", { class: "ai" }, el("h4", {}, "Analyse IA"), el("p", { class: "meta" }, msg));
+  }
+  const an = a.analysis;
+  return el("div", { class: "ai" },
+    el("h4", {}, `Analyse IA · ${an.model.split("/").pop()}`),
+    el("div", {}, verdictBadge(a)),
+    el("div", { class: "conf" }, el("div", { style: `width:${Math.round(an.confidence * 100)}%` })),
+    el("p", {}, an.summary),
+    an.mitre.length ? el("div", { class: "mitre" }, el("h4", {}, "MITRE ATT&CK"),
+      an.mitre.map(t => {
+        // Lien vers la fiche ATT&CK si un identifiant Txxxx(.yyy) est reconnu ; T1110.001 → /techniques/T1110/001/.
+        const id = (t.match(/T\d{4}(?:\.\d{3})?/) || [])[0];
+        return id ? el("a", { href: `https://attack.mitre.org/techniques/${id.replace(".", "/")}/`, target: "_blank", rel: "noopener" }, t) : el("span", { class: "meta" }, t + " ");
+      })) : null,
+    an.recommendations.length ? [el("h4", { style: "margin-top:10px" }, "Recommandations"), el("ol", {}, an.recommendations.map(r => el("li", {}, r)))] : null,
+  );
+}
+
+// Carte d'une alerte : ligne cliquable (sévérité, titre, résumé, badge, heure) et détail dépliable.
+// `fresh` active l'animation de nouvelle alerte. L'état déplié est conservé dans `open`, pour
+// survivre au remplacement de la carte lors d'une mise à jour.
+function renderAlert(a, fresh = false) {
+  const card = el("div", { class: `alert${open.has(a.id) ? " open" : ""}${fresh ? " fresh" : ""}`, style: `--c:${sevColor(a.severity)}`, "data-id": a.id },
+    el("div", { class: "row", onclick: () => { open.has(a.id) ? open.delete(a.id) : open.add(a.id); card.classList.toggle("open"); } },
+      el("div", { class: "sev" }, LABELS[a.severity]),
+      el("div", { style: "min-width:0" },
+        el("div", { class: "title" }, a.title),
+        el("div", { class: "meta" }, [a.kind.replaceAll("_", " "), a.src && `src ${a.src}`, a.dst && `→ ${a.dst}`, a.count > 1 && `×${a.count}`].filter(Boolean).join(" · "))),
+      verdictBadge(a),
+      el("div", { class: "time" }, fmtTime(a.last_seen))),
+    el("div", { class: "details" },
+      el("div", {},
+        el("h4", {}, "Détection"),
+        el("p", {}, a.description || "—"),
+        el("div", { class: "kv" },
+          el("span", {}, "Source"), el("span", {}, a.src || "—"),
+          el("span", {}, "Cible"), el("span", {}, a.dst || "—"),
+          el("span", {}, "Première vue"), el("span", {}, fmtTime(a.first_seen)),
+          el("span", {}, "Dernière vue"), el("span", {}, fmtTime(a.last_seen)),
+          el("span", {}, "Occurrences"), el("span", {}, a.count)),
+        el("h4", {}, "Preuves"),
+        el("pre", {}, JSON.stringify(a.evidence, null, 2))),
+      renderAnalysis(a)));
+  return card;
+}
+
+// Vrai si l'alerte passe tous les filtres actifs (sévérité, source, verdict, recherche texte).
+function matches(a) {
+  if (minSeverity && a.severity !== minSeverity) return false;
+  const src = document.getElementById("source").value;
+  if (src && a.source !== src) return false;
+  const v = document.getElementById("verdict").value;
+  if (v === "pending" && a.triage !== "pending") return false;
+  if (v && v !== "pending" && a.analysis?.verdict !== v) return false;
+  const s = document.getElementById("search").value.trim().toLowerCase();
+  if (s && ![a.title, a.kind, a.src, a.dst, a.description].some(x => x && x.toLowerCase().includes(s))) return false;
+  return true;
+}
+
+// Reconstruit toute la liste (après un changement de filtre ou un rechargement complet).
+function renderAll() {
+  const list = document.getElementById("alerts");
+  const items = [...alerts.values()].filter(matches).sort((x, y) => y.id - x.id);
+  list.replaceChildren(...(items.length ? items.map(a => renderAlert(a)) :
+    [el("div", { class: "empty" }, alerts.size ? "Aucune alerte ne correspond aux filtres." : "Aucune alerte pour l'instant. L'agent surveille le réseau et les logs.")]));
+  renderCounters();
+}
+
+// Applique un événement du flux : remplace la carte existante, ou insère la nouvelle en tête.
+// Plus léger que renderAll(), et préserve la position de lecture dans la liste.
+function upsert(a, isNew) {
+  alerts.set(a.id, a);
+  if (!matches(a)) return renderCounters();
+  const list = document.getElementById("alerts");
+  const existing = list.querySelector(`[data-id="${a.id}"]`);
+  const card = renderAlert(a, isNew);
+  if (existing) existing.replaceWith(card);
+  else { list.querySelector(".empty")?.remove(); list.prepend(card); }
+  renderCounters();
+}
+
+// Compteurs par sévérité (sur toutes les alertes, filtres ignorés). Un clic filtre ou défiltre.
+function renderCounters() {
+  const counts = Object.fromEntries(SEVERITIES.map(s => [s, 0]));
+  for (const a of alerts.values()) counts[a.severity]++;
+  document.getElementById("counters").replaceChildren(...SEVERITIES.map(s =>
+    el("div", { class: `counter${minSeverity === s ? " active" : ""}`, style: `--c:${sevColor(s)}`, onclick: () => { minSeverity = minSeverity === s ? null : s; renderAll(); } },
+      el("div", { class: "n" }, fmtNum(counts[s])), el("div", { class: "l" }, LABELS[s]))));
+}
+
+// Met à jour les pastilles du bandeau. Le débit est calculé côté navigateur, par différence
+// avec la mesure précédente.
+async function refreshStats() {
+  try {
+    const { stats } = await (await fetch(q("/api/stats"))).json();
+    const now = Date.now();
+    const pps = lastPackets != null ? Math.max(0, (stats.packets - lastPackets) / ((now - lastTime) / 1000)) : 0;
+    lastPackets = stats.packets; lastTime = now;
+    const pill = (label, value, cls = "") => el("span", { class: `pill ${cls}` }, `${label} `, el("b", {}, value));
+    document.getElementById("pills").replaceChildren(...[
+      pill("Interface", stats.interface || "—"),
+      pill("Paquets", `${fmtNum(stats.packets)} (${fmtNum(Math.round(pps))}/s)`),
+      pill("Trafic", fmtBytes(stats.bytes)),
+      stats.dropped ? pill("Perdus", fmtNum(stats.dropped), "ko") : null,
+      pill("Lignes de logs", fmtNum(stats.log_lines)),
+      pill("IA", stats.llm_online ? `en ligne · ${stats.llm_analyzed} analysées` : "hors ligne", stats.llm_online ? "ok" : "ko"),
+    ].filter(Boolean));
+  } catch { /* l'indicateur de connexion suffit */ }
+}
+
+// Connexion au flux d'événements. EventSource se reconnecte tout seul après une coupure ;
+// `onopen` recharge alors la liste complète pour rattraper les événements manqués.
+function connect() {
+  const es = new EventSource(q("/api/events"));
+  const dot = document.getElementById("live");
+  es.onopen = async () => {
+    dot.classList.remove("off");
+    const list = await (await fetch(q("/api/alerts?limit=1000"))).json();
+    alerts.clear();
+    for (const a of list) alerts.set(a.id, a);
+    renderAll();
+  };
+  es.onmessage = (m) => { const ev = JSON.parse(m.data); upsert(ev.alert, ev.type === "new"); };
+  es.onerror = () => dot.classList.add("off");
+}
+
+// Démarrage : écouteurs des filtres, premier rendu (liste vide), connexion, statistiques.
+for (const id of ["search", "source", "verdict"]) document.getElementById(id).addEventListener("input", renderAll);
+renderAll();
+connect();
+refreshStats();
+setInterval(refreshStats, 2000);
+</script>
+</body>
+</html>
