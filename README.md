@@ -34,26 +34,42 @@ Tout reste sur ta machine : aucune donnée réseau ni aucun log ne part vers un 
 
 ## 1. Principe de fonctionnement
 
-```
-                    ┌─────────────────────────── Cyward ───────────────────────────┐
-                    │                                                              │
- interface réseau ──┼─► capture AF_PACKET ─► parsing ─► détecteurs réseau ──┐      │
-  (ou fichier pcap) │      (thread dédié)    (etherparse)  (scan, C2, DNS…)  │      │
-                    │                                                      ▼      │
- journald ──────────┼─► journalctl -f ─┐                               AlertSink   │
- /var/log/*.log ────┼─► tail -F ───────┴─► règles de logs ──────────────►  │      │
-                    │                      (SSH, sudo, comptes…)            │      │
-                    │                                                      ▼      │
-                    │                                   AlertStore (dédoublonnage)│
-                    │                                     │               │       │
-                    │                    alerte ≥ seuil   │               │ SSE   │
-                    │                                     ▼               ▼       │
-                    │                            file de triage     dashboard web │
-                    │                                     │          (axum)       │
-                    └─────────────────────────────────────┼───────────────────────┘
-                                                          ▼
-                                       LLM cyber local (Ollama, llama.cpp, vLLM…)
-                                       → verdict, explication, MITRE ATT&CK, actions
+```mermaid
+flowchart TB
+    subgraph SRC["Sources observées"]
+        direction LR
+        NET["Interface réseau<br/>ou fichier pcap"]
+        JRN["Journal systemd<br/>(journald)"]
+        FIC["Fichiers de logs<br/>/var/log/…"]
+    end
+
+    subgraph E1["Étage 1 : détection temps réel, en Rust"]
+        direction TB
+        CAP["Capture AF_PACKET<br/>thread dédié"]
+        PAR["Parsing etherparse<br/>→ métadonnées du paquet"]
+        DET["Détecteurs réseau<br/>scan, force brute, C2, DNS, volume…"]
+        LEC["Lecture continue<br/>journalctl -f, tail -F"]
+        REG["Règles de logs<br/>SSH, sudo, comptes…"]
+    end
+
+    SINK["AlertSink<br/>point d'entrée des alertes"]
+    STORE["AlertStore<br/>historique et dédoublonnage"]
+    FILE[["File de triage<br/>sévérité ≥ seuil"]]
+    LLM["Étage 2 : LLM cyber local<br/>Ollama, llama.cpp, vLLM…<br/>verdict, MITRE ATT&CK, actions"]
+    WEB["Dashboard web<br/>axum, API, flux SSE"]
+    USER(["Analyste<br/>dans le navigateur"])
+
+    NET --> CAP --> PAR --> DET --> SINK
+    JRN --> LEC
+    FIC --> LEC
+    LEC --> REG --> SINK
+    SINK --> STORE
+    SINK -- "alerte nouvelle et assez grave" --> FILE --> LLM
+    LLM -- "analyse ajoutée à l'alerte" --> STORE
+    STORE -- "nouvelles alertes et mises à jour" --> WEB --> USER
+
+    classDef etage2 fill:#1f6feb22,stroke:#58a6ff
+    class LLM etage2
 ```
 
 Le système fonctionne en deux étages.
