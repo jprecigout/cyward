@@ -94,6 +94,8 @@ pub struct DetectionConfig {
     pub auth: AuthConfig,
     /// Règles regex supplémentaires appliquées aux logs (`[[detection.custom_log_rules]]`).
     pub custom_log_rules: Vec<CustomLogRule>,
+    /// Apprentissage du comportement normal (`[detection.anomaly]`).
+    pub anomaly: AnomalyConfig,
 }
 
 impl Default for DetectionConfig {
@@ -115,6 +117,7 @@ impl Default for DetectionConfig {
             dns: Default::default(),
             auth: Default::default(),
             custom_log_rules: Vec::new(),
+            anomaly: Default::default(),
         }
     }
 }
@@ -267,6 +270,71 @@ pub struct AuthConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self { window_secs: 300, failures_threshold: 6 }
+    }
+}
+
+/// Mode de l'apprentissage du comportement normal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnomalyMode {
+    /// Anomalies en sévérité `info`, sans LLM : pour calibrer le modèle sans être dérangé.
+    Observation,
+    /// Anomalies en sévérité `medium`, analysées par le LLM.
+    Alert,
+}
+
+/// Section `[detection.anomaly]` : apprentissage du comportement normal par Isolation Forest.
+/// Voir doc/conception-normalite.md.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AnomalyConfig {
+    /// Désactivé par défaut : la fonctionnalité demande une période d'apprentissage et des validations.
+    pub enabled: bool,
+    pub mode: AnomalyMode,
+    /// Durée d'une fenêtre d'observation, en secondes (un échantillon par machine et par fenêtre).
+    pub window_secs: f64,
+    /// Dossier de persistance (échantillons, modèles, journal). Vide = en mémoire seulement.
+    pub data_dir: String,
+    /// Échantillons utilisables nécessaires pour lancer un apprentissage.
+    pub min_training_samples: usize,
+    /// Durée couverte par les échantillons avant le premier apprentissage automatique, en heures.
+    pub learning_hours: f64,
+    /// Délai entre deux apprentissages automatiques, en heures.
+    pub retrain_interval_hours: f64,
+    /// Durée de conservation des échantillons, en jours.
+    pub retention_days: f64,
+    /// Plafond du nombre d'échantillons conservés.
+    pub max_samples: usize,
+    /// Nombre d'arbres de l'Isolation Forest.
+    pub trees: usize,
+    /// Taille du sous-échantillon tiré pour chaque arbre.
+    pub sample_size: usize,
+    /// Part des données d'apprentissage considérée comme atypique : fixe le seuil d'anomalie.
+    pub contamination: f64,
+    /// Facteur de variation d'un volume, depuis le premier modèle validé, qui déclenche une alerte de dérive.
+    pub drift_factor: f64,
+    /// Nombre de versions de modèle conservées pour le retour arrière.
+    pub max_versions: usize,
+}
+
+impl Default for AnomalyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: AnomalyMode::Observation,
+            window_secs: 300.0,
+            data_dir: String::new(),
+            min_training_samples: 500,
+            learning_hours: 168.0,
+            retrain_interval_hours: 168.0,
+            retention_days: 28.0,
+            max_samples: 200_000,
+            trees: 100,
+            sample_size: 256,
+            contamination: 0.005,
+            drift_factor: 10.0,
+            max_versions: 10,
+        }
     }
 }
 

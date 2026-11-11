@@ -1,0 +1,40 @@
+# Configuration utilisée par l'image Docker (montée dans /etc/cyward/cyward.toml par compose.yaml).
+# Toutes les options sont décrites dans config.example.toml.
+
+[capture]
+enabled = true
+# Vide = interface de la route par défaut de l'hôte (le conteneur partage le réseau de l'hôte).
+interface = ""
+
+[logs]
+enabled = true
+# Lit le journal de l'hôte, monté en lecture seule dans le conteneur.
+journald = true
+
+[detection]
+whitelist = []
+local_networks = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", "fe80::/10"]
+
+[detection.anomaly]
+# Apprentissage du comportement normal (doc/conception-normalite.md), en mode observation :
+# les anomalies apparaissent en « info » le temps de calibrer le modèle.
+enabled = true
+mode = "observation"
+# Volume Docker « cyward-data » (voir compose.yaml) : le conteneur est en lecture seule ailleurs.
+data_dir = "/var/lib/cyward"
+
+[llm]
+enabled = true
+# Le service ollama publie son port sur le localhost de l'hôte, que Cyward voit grâce au réseau hôte.
+base_url = "http://127.0.0.1:11434/v1"
+# Doit être identique à CYWARD_MODEL dans compose.yaml / .env.
+model = "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
+min_severity = "medium"
+language = "français"
+
+[web]
+# Localhost de l'hôte. Pour exposer le dashboard sur le réseau : "0.0.0.0:8080" ET un token.
+listen = "127.0.0.1:8080"
+# Obligatoire pour répondre « est-ce normal ? » et valider les modèles depuis le dashboard
+# (ouvrir ensuite http://127.0.0.1:8080/?token=…). Générer une valeur : openssl rand -hex 32
+token = ""

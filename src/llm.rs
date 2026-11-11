@@ -229,6 +229,15 @@ fn user_prompt(alert: &Alert, related: &[Alert]) -> String {
         "preuves": alert.evidence,
     });
     let mut s = format!("Alerte à analyser :\n{}\n", serde_json::to_string_pretty(&main).unwrap_or_default());
+    // Anomalie de comportement : le modèle aide l'utilisateur à répondre « est-ce normal ? »,
+    // mais ne décide pas à sa place (les données observées peuvent avoir été choisies par un attaquant).
+    if alert.kind == crate::alert::AlertKind::HostAnomaly {
+        s.push_str(
+            "\nCette alerte vient d'un modèle qui a appris le comportement habituel de la machine (Isolation Forest). \
+Si l'écart peut avoir une cause bénigne (mise à jour d'un jeu ou du système, sauvegarde, nouvel appareil, nouvel usage), \
+cite le motif le plus probable au début de summary, en précisant qu'il s'agit d'une hypothèse : c'est l'utilisateur qui confirmera.\n",
+        );
+    }
     if !related.is_empty() {
         s.push_str("\nAlertes récentes impliquant les mêmes adresses :\n");
         // Une ligne résumée par alerte liée, pour ne pas gonfler le prompt.

@@ -8,6 +8,7 @@ use serde_json::json;
 use super::{Detector, ts_to_dt};
 use crate::{
     alert::{Alert, AlertKind, AlertSource, Severity},
+    anomaly::features::human_bytes,
     capture::PacketMeta,
     config::{DetectionConfig, VolumeConfig},
 };
@@ -124,18 +125,6 @@ impl Detector for Volume {
     fn tick(&mut self, now: f64, out: &mut Vec<Alert>) {
         self.roll(now, out);
     }
-}
-
-/// Formate un nombre d'octets en unité lisible (o, Ko, Mo…), en base 1024.
-fn human_bytes(b: f64) -> String {
-    const UNITS: [&str; 5] = ["o", "Ko", "Mo", "Go", "To"];
-    let mut v = b;
-    let mut i = 0;
-    while v >= 1024.0 && i < UNITS.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    format!("{v:.1} {}", UNITS[i])
 }
 
 #[cfg(test)]

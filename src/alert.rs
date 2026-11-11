@@ -62,6 +62,49 @@ pub enum AlertKind {
     AccountChange,
     /// Règle définie par l'utilisateur dans la configuration.
     CustomRule,
+    // --- Apprentissage du comportement normal ---
+    /// Fenêtre d'activité d'une machine jugée anormale par l'Isolation Forest.
+    HostAnomaly,
+    /// Un modèle candidat présente une dérive cumulée depuis le premier modèle validé.
+    BaselineDrift,
+    /// L'utilisateur a refusé le nouveau comportement d'une machine lors d'une validation.
+    BaselineRejected,
+}
+
+impl AlertKind {
+    /// Vrai pour les alertes produites par l'apprentissage du comportement normal. Les autres
+    /// viennent de détecteurs à règles : une fenêtre touchée par l'une d'elles n'est jamais apprise.
+    pub fn is_learning(&self) -> bool {
+        matches!(self, AlertKind::HostAnomaly | AlertKind::BaselineDrift | AlertKind::BaselineRejected)
+    }
+}
+
+/// Réponse de l'utilisateur à la question « est-ce normal ? » sur une anomalie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeedbackVerdict {
+    Normal,
+    Suspect,
+}
+
+/// Portée d'une réponse « normal ».
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeedbackScope {
+    /// Seulement les fenêtres de cette alerte.
+    Once,
+    /// Ces fenêtres, et une exception pour ce type d'écart sur cette machine jusqu'au prochain modèle.
+    Always,
+}
+
+/// Réponse enregistrée sur une alerte d'anomalie.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Feedback {
+    pub verdict: FeedbackVerdict,
+    /// Motif choisi par l'utilisateur (mise à jour, sauvegarde…).
+    pub reason: String,
+    pub scope: FeedbackScope,
+    pub at: DateTime<Utc>,
 }
 
 /// Origine de l'alerte, affichée et filtrable dans le dashboard.
@@ -128,6 +171,8 @@ pub struct Alert {
     pub count: u32,
     pub triage: TriageStatus,
     pub analysis: Option<Analysis>,
+    /// Réponse de l'utilisateur (alertes d'anomalie uniquement).
+    pub feedback: Option<Feedback>,
     /// Clé de dédoublonnage, interne : non exposée dans l'API.
     #[serde(skip)]
     pub fingerprint: String,
@@ -152,6 +197,7 @@ impl Alert {
             count: 1,
             triage: TriageStatus::None,
             analysis: None,
+            feedback: None,
             fingerprint: String::new(),
         }
     }

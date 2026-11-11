@@ -59,7 +59,13 @@ echo "ok : ${#EXPECTED_TITLES[@]} alertes attendues, aucune en trop"
 if [ "${1:-}" = "--docker" ]; then
   step "Image Docker"
   docker compose build -q cyward
-  docker run --rm -v "$tmp:/data:ro" cyward:latest replay /data/attaques.pcap 2>/dev/null | head -1
+  # Sortie capturée en entier : un `| head` couperait le flux et, avec pipefail, ferait échouer
+  # le script dès que des journaux précèdent le bilan.
+  docker_report=$(docker run --rm -e NO_COLOR=1 -v "$tmp:/data:ro" cyward:latest replay /data/attaques.pcap 2>/dev/null)
+  docker_line=$(echo "$docker_report" | grep "octets analysés" || true)
+  echo "$docker_line"
+  docker_count=$(echo "$docker_line" | sed -n 's/.*octets analysés, \([0-9]*\) alerte(s)/\1/p')
+  [ "$docker_count" = "${#EXPECTED_TITLES[@]}" ] || fail "image Docker : ${docker_count:-?} alerte(s) au lieu de ${#EXPECTED_TITLES[@]}"
 fi
 
 printf '\n\033[32mTout est vert.\033[0m\n'

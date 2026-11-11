@@ -64,6 +64,8 @@ services:
       # Journal systemd de l'hôte. Le machine-id permet à journalctl de retrouver ce journal.
       - /var/log/journal:/var/log/journal:ro
       - /etc/machine-id:/etc/machine-id:ro
+      # Apprentissage du comportement normal : échantillons, modèles et journal des décisions.
+      - cyward-data:/var/lib/cyward
     environment:
       RUST_LOG: info
     depends_on:
@@ -72,3 +74,4 @@ services:
 
 volumes:
   ollama:
+  cyward-data:

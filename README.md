@@ -47,7 +47,7 @@ flowchart TB
         direction TB
         CAP["Capture AF_PACKET<br/>thread dédié"]
         PAR["Parsing etherparse<br/>→ métadonnées du paquet"]
-        DET["Détecteurs réseau<br/>scan, force brute, C2, DNS, volume…"]
+        DET["Détecteurs réseau<br/>scan, force brute, C2, DNS, volume…<br/>et écarts au comportement appris"]
         LEC["Lecture continue<br/>journalctl -f, tail -F"]
         REG["Règles de logs<br/>SSH, sudo, comptes…"]
     end
@@ -98,6 +98,8 @@ cyward/
 ├── docker/cyward.toml         # configuration utilisée par l'image Docker
 ├── LICENSE                    # Apache 2.0
 ├── CLAUDE.md                  # règles du projet pour Claude Code
+├── doc/
+│   └── conception-normalite.md  # conception de l'apprentissage du comportement normal
 ├── .claude/skills/            # skills : verifier, nouveau-detecteur, nouvelle-regle-log, revue
 ├── assets/
 │   ├── index.html             # dashboard (embarqué dans le binaire à la compilation)
@@ -116,7 +118,16 @@ cyward/
     │   ├── scan.rs            # scan, balayage, force brute, inondation SYN    ①
     │   ├── beacon.rs          # balises périodiques (C2)                       ①
     │   ├── volume.rs          # volume sortant anormal (exfiltration)          ①
-    │   └── dns.rs             # DNS à forte entropie, tunnel DNS               ①
+    │   ├── dns.rs             # DNS à forte entropie, tunnel DNS               ①
+    │   └── anomaly.rs         # écarts au comportement normal appris           ①
+    ├── anomaly/               # apprentissage du comportement normal
+    │   ├── features.rs        # 12 caractéristiques par machine et par fenêtre
+    │   ├── iforest.rs         # Isolation Forest (sans dépendance)
+    │   ├── model.rs           # échantillons et modèles versionnés
+    │   ├── diff.rs            # ce qu'un nouveau modèle accepterait de plus
+    │   ├── baseline.rs        # cycle de vie et garde-fous de validation        ③
+    │   ├── storage.rs         # persistance sur disque                          ⑨
+    │   └── trainer.rs         # apprentissages périodiques                      ⑤
     ├── logs.rs                # sources de logs et règles d'analyse            ⑤ ⑦
     ├── llm.rs                 # client du modèle, prompt, décodage du verdict  ⑤
     └── web.rs                 # serveur HTTP, API JSON, flux SSE               ④ ⑥
@@ -136,6 +147,7 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 - **Parsing** : assuré par `etherparse` ; la question DNS est extraite à la main.
 
 **`detect/`** — Strategy ①
+- Sept stratégies : six détecteurs à règles, plus `HostAnomaly` qui alimente l'apprentissage du comportement normal (s'il est activé).
 - Chaque détecteur implémente :
   ```rust
   trait Detector {
@@ -164,6 +176,11 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 **`web.rs`** — observateur ④ (flux SSE), Middleware ⑥
 - Serveur `axum`. Il sert le dashboard, une API JSON et un flux Server-Sent Events pour les mises à jour en direct.
 
+**`anomaly/`** — Façade ③ (`Baseline`), Repository ⑨ (`Storage`)
+- Apprend le comportement normal de chaque machine interne avec un **Isolation Forest**, et ne fait rien entrer dans ce comportement sans validation humaine. Conception complète : [doc/conception-normalite.md](doc/conception-normalite.md).
+- `detect/anomaly.rs` (une stratégie ① de plus) résume le trafic de chaque machine par fenêtre ; `Baseline` enregistre ces échantillons, les fait juger par le modèle actif, gère le modèle candidat, son diff, les exceptions, les versions et le journal des décisions.
+- Désactivé par défaut (`[detection.anomaly]`), voir la section 3.9.
+
 **`banner.rs`**
 - Construit la bannière affichée au démarrage. La fonction de rendu est pure (elle renvoie une chaîne) ; seul `main.rs` l'affiche, avec ou sans couleurs selon le terminal.
 
@@ -173,50 +190,57 @@ Les dépendances vont dans un seul sens : les **producteurs** d'alertes (`detect
 
 | Module | Dépend de | Ne doit jamais dépendre de |
 |---|---|---|
-| `detect/` | `alert`, `capture` (`PacketMeta`), `config` | `llm`, `web`, `logs` |
+| `detect/` | `alert`, `anomaly`, `capture` (`PacketMeta`), `config` | `llm`, `web`, `logs` |
+| `anomaly/` | `alert`, `config` | `detect`, `llm`, `web`, `logs` |
 | `logs.rs` | `alert`, `config`, `stats` | `llm`, `web`, `detect` |
 | `llm.rs` | `alert`, `config`, `stats` | `detect`, `logs`, `web` |
-| `web.rs` | `alert`, `stats` | `detect`, `logs`, `llm` |
+| `web.rs` | `alert`, `anomaly`, `stats` | `detect`, `logs`, `llm` |
 | `main.rs` | tous | — |
 
 `main.rs` est la **racine de composition** : c'est le seul endroit qui crée les composants et les relie entre eux (canaux, `Arc` partagés). Changer de serveur LLM, ou désactiver le triage IA, ne demande donc aucune modification des détecteurs.
 
-Autre principe de découpage : **la logique de décision ne fait pas d'entrées/sorties**. `parse_packet`, `parse_dns_query`, les détecteurs, `LogAnalyzer::analyze`, `parse_analysis` et `banner::render` ne touchent ni au réseau, ni aux fichiers, ni au LLM. Ils se testent avec de simples valeurs en mémoire, et les I/O restent en bordure (sockets, sous-processus, HTTP).
+Autre principe de découpage : **la logique de décision ne fait pas d'entrées/sorties**. `parse_packet`, `parse_dns_query`, les détecteurs, `LogAnalyzer::analyze`, `parse_analysis`, `banner::render`, ainsi que les caractéristiques, l'Isolation Forest et le diff de `anomaly/`, ne touchent ni au réseau, ni aux fichiers, ni au LLM. Ils se testent avec de simples valeurs en mémoire, et les I/O restent en bordure (sockets, sous-processus, HTTP).
 
 ### Design patterns utilisés
 
-Cyward est construit sur **8 design patterns**. Le schéma montre où chacun intervient dans le parcours d'une donnée, du paquet ou de la ligne de log jusqu'au navigateur et au LLM. Chaque pattern est ensuite détaillé avec ses rôles, le vrai code et la façon de s'en servir.
+Cyward est construit sur **9 design patterns**. Le schéma montre où chacun intervient dans le parcours d'une donnée, du paquet ou de la ligne de log jusqu'au navigateur et au LLM. Chaque pattern est ensuite détaillé avec ses rôles, le vrai code et la façon de s'en servir.
 
 ```
- ┌──────────────── ⑧ Racine de composition : main.rs crée et relie tous les composants ────────────────┐
- │                                                                                                     │
- │  interface réseau ─► capture ══⑤══► Engine ──①──► PortScan, BruteForce, SynFlood,                   │
- │                     (thread)                       Beaconing, Volume, Dns                           │
- │                                                          │ Alert::new(..).src(..)… ②                │
- │  journalctl, tail ◄──⑦── supervise ══⑤══► LogAnalyzer ───┤                                          │
- │                                                          ▼                                          │
- │                                                    AlertSink ③ ══⑤══► worker LLM                    │
- │                                                          │                                          │
- │                                                          ▼                                          │
- │                                                    AlertStore ──④──► clients SSE du dashboard       │
- │                                                                         ▲                           │
- │                                                    web.rs : ⑥ middleware d'authentification         │
- └─────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ ┌────────────── ⑧ Racine de composition : main.rs crée et relie tous les composants ──────────────┐
+ │                                                                                                 │
+ │  interface réseau ─► capture ══⑤══► Engine ──①──► PortScan, BruteForce, SynFlood,               │
+ │                     (thread)                        Beaconing, Volume, Dns, HostAnomaly         │
+ │                                                           │ Alert::new(..).src(..)… ②           │
+ │  journalctl, tail ◄──⑦── supervise ══⑤══► LogAnalyzer ───┤                                      │
+ │                                                           ▼                                     │
+ │                                                     AlertSink ③ ══⑤══► worker LLM               │
+ │                                                           │                                     │
+ │                                                           ▼                                     │
+ │                                                     AlertStore ──④──► clients SSE du dashboard  │
+ │                                                                          ▲                      │
+ │                                                     web.rs : ⑥ middlewares (accès, écriture)    │
+ │                                                                                                 │
+ │  HostAnomaly ──► Baseline ③ ──► Storage ⑨ (disque)     trainer ══⑤══► apprentissages            │
+ │                      ▲                                                                          │
+ │                      └── web.rs : « est-ce normal ? », validation du diff, retour arrière       │
+ │                                                                                                 │
+ └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 
  ① Strategy  ② Builder  ③ Façade  ④ Observer  ⑤ Producteur/consommateur (══ canal)
- ⑥ Middleware  ⑦ Superviseur  ⑧ Racine de composition
+ ⑥ Middleware  ⑦ Superviseur  ⑧ Racine de composition  ⑨ Repository
 ```
 
 | # | Pattern | Où | Problème résolu dans Cyward |
 |---|---|---|---|
-| ① | **Strategy** | `trait Detector`, `Engine` (`src/detect/`) | Ajouter une détection sans toucher au moteur |
+| ① | **Strategy** | `trait Detector`, `Engine` (`src/detect/`) | Ajouter une détection (y compris l'apprentissage du comportement normal) sans toucher au moteur |
 | ② | **Builder** | `Alert::new(...).src(...)...` (`src/alert.rs`) | Construire lisiblement une alerte aux nombreux champs optionnels |
-| ③ | **Façade** | `AlertSink::emit` (`src/alert.rs`) | Un point d'entrée unique qui masque stockage, dédoublonnage et triage IA |
+| ③ | **Façade** | `AlertSink::emit` (`src/alert.rs`) ; `Baseline` (`src/anomaly/baseline.rs`) | Un point d'entrée unique qui masque un sous-système : stockage et triage des alertes ; cycle de vie du comportement normal |
 | ④ | **Observer** | `AlertStore` + canal `broadcast` → SSE (`src/alert.rs`, `src/web.rs`) | Prévenir un nombre inconnu de navigateurs à chaque changement |
 | ⑤ | **Producteur/consommateur** | canaux `mpsc` (`main.rs`, `capture.rs`, `logs.rs`, `llm.rs`) | Découpler des étages de vitesses très différentes |
-| ⑥ | **Middleware** | `auth` (`src/web.rs`) | Appliquer le contrôle d'accès à toutes les routes en un seul endroit |
+| ⑥ | **Middleware** | `auth`, `write_guard` (`src/web.rs`) | Appliquer le contrôle d'accès à toutes les routes, et un contrôle renforcé aux routes d'écriture, en un seul endroit |
 | ⑦ | **Superviseur** | `logs::supervise` (`src/logs.rs`) | Relancer une source de logs qui s'arrête |
 | ⑧ | **Racine de composition** | `start_pipeline`, `run` (`src/main.rs`) | Injecter les dépendances au lieu d'un état global |
+| ⑨ | **Repository** | `Storage` (`src/anomaly/storage.rs`) | Isoler la persistance : le reste du code manipule des structures, sans savoir où ni comment elles sont écrites |
 
 #### ① Strategy : les détecteurs
 
@@ -224,7 +248,7 @@ Cyward est construit sur **8 design patterns**. Le schéma montre où chacun int
 
 **Rôles dans Cyward :**
 - **Interface de stratégie** : le trait `Detector`.
-- **Stratégies concrètes** : `PortScan`, `BruteForce`, `SynFlood` (`scan.rs`), `Beaconing` (`beacon.rs`), `Volume` (`volume.rs`), `Dns` (`dns.rs`).
+- **Stratégies concrètes** : `PortScan`, `BruteForce`, `SynFlood` (`scan.rs`), `Beaconing` (`beacon.rs`), `Volume` (`volume.rs`), `Dns` (`dns.rs`), et `HostAnomaly` (`anomaly.rs`), ajoutée seulement si l'apprentissage est activé.
 - **Contexte** : `Engine`, qui détient les stratégies sous forme de `Box<dyn Detector>` et leur distribue chaque paquet sans savoir ce qu'elles font.
 
 ```rust
@@ -292,6 +316,8 @@ pub fn emit(&self, alert: Alert) {
 }
 ```
 
+**Seconde façade : `Baseline`** (`src/anomaly/baseline.rs`). Le détecteur, l'entraîneur et l'API web n'appellent que ses méthodes (`record_window`, `feedback`, `train`, `decide`, `rollback`, `status`). Elle masque les échantillons, le modèle actif et le candidat, le diff, les exceptions, les versions, le journal et le stockage, et c'est elle qui applique tous les garde-fous de validation : aucun appelant ne peut les contourner.
+
 **Utilisation** : tout nouveau producteur d'alertes reçoit un `AlertSink` et appelle `emit`. Il ne doit jamais écrire directement dans le store ni dans la file du LLM. Une règle transverse (par exemple notifier un webhook) s'ajoute ici, une seule fois, pour toutes les sources.
 
 #### ④ Observer : la diffusion en direct au dashboard
@@ -351,6 +377,8 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
 }
 ```
 
+Les routes d'écriture (réponses « est-ce normal ? », validation, retour arrière) ont un **second maillon**, `write_guard`, appliqué à elles seules par `route_layer`. Il exige un jeton configuré, transmis dans l'en-tête `Authorization` : le jeton dans l'URL ne suffit pas, pour qu'une page tierce piégée ne puisse pas valider à la place de l'utilisateur.
+
 **Utilisation** : tout comportement commun à toutes les routes (journalisation des accès, limitation de débit, en-têtes de sécurité) s'ajoute comme nouvelle couche `.layer(...)`, sans toucher aux handlers.
 
 #### ⑦ Superviseur : la résilience des sources de logs
@@ -392,6 +420,22 @@ let sink = AlertSink::new(store.clone(), triage, cfg.llm.min_severity);
 **Utilisation** : un nouveau composant reçoit ce dont il a besoin en paramètre (`Arc<AlertStore>`, `Arc<Stats>`, un émetteur de canal) et c'est `main.rs` qui le branche. C'est ce qui permet de le tester isolément avec de fausses dépendances, et de désactiver un étage (`--no-llm`) sans toucher aux autres.
 
 Ce pattern explique aussi l'absence d'état global ou de singleton : l'état partagé circule explicitement en `Arc`, avec des atomiques pour les compteurs et des verrous courts pour le reste.
+
+#### ⑨ Repository : la persistance de l'apprentissage
+
+**Principe** : un objet dédié lit et écrit les données sur leur support ; le reste du code ne manipule que des structures en mémoire.
+
+**Rôles dans Cyward :** `Storage` est le seul à connaître le dossier `data_dir`, ses fichiers (`state.json`, `models/v<N>.json`, `decisions.jsonl`) et leur format. `Baseline` lui confie l'état, les modèles validés et le journal, sans rien savoir des fichiers. L'écriture de l'état est atomique (fichier temporaire, puis renommage).
+
+```rust
+// src/anomaly/storage.rs
+pub fn save_model(&self, m: &Model) -> Result<()> {
+    let path = self.model_path(m.version);
+    fs::write(&path, serde_json::to_vec(m)?).with_context(|| format!("écriture de {}", path.display()))
+}
+```
+
+**Utilisation** : changer de format ou de support (SQLite, par exemple) ne touche que `storage.rs`. Sans `data_dir`, `Baseline` fonctionne simplement sans `Storage`, en mémoire.
 
 ---
 
@@ -521,6 +565,33 @@ Pour qu'une règle s'applique aux logs d'une application (nginx, Apache…), ajo
 | `medium` | Comportement suspect à qualifier | oui |
 | `low` | Signal faible, utile en corrélation | non |
 | `info` | Information | non |
+
+### 3.9 Apprentissage du comportement normal (`HostAnomaly`)
+
+**Ce qu'il repère :** ce qui sort de l'habitude d'une machine, sans règle écrite à l'avance. Par exemple, une combinaison dont chaque mesure, prise seule, resterait sous les seuils : 40 destinations inconnues, la nuit, sur des ports inhabituels.
+
+**Fonctionnement :**
+- Toutes les `window_secs` (5 min par défaut), chaque machine interne active est résumée par **12 caractéristiques** : volumes envoyés et reçus, connexions, destinations et ports distincts, part du trafic vers l'extérieur, part de destinations jamais vues, requêtes DNS et leur entropie, heure de la journée.
+- Un **Isolation Forest** apprend ces profils. Un point est d'autant plus anormal qu'il est vite isolé par des coupures aléatoires. Le seuil est calculé automatiquement à partir des données apprises (`contamination`).
+- Chaque anomalie est **expliquée** par ses plus gros écarts au profil habituel de la machine : « Octets envoyés : 83.2 Mo (habituellement 1.2 Mo) ». Une machine encore peu connue est comparée à la médiane du réseau, et l'explication le dit.
+
+**Garde-fous : rien n'entre dans le comportement normal sans validation humaine.**
+- Chaque anomalie pose la question **« est-ce normal ? »** dans le dashboard, avec un motif (mise à jour, sauvegarde, nouvel appareil…) et une portée (cette fois, ou désormais pour cette machine et ce type d'écart). Tant qu'elle reste sans réponse, la période n'est pas apprise. « Suspect » l'exclut définitivement.
+- Chaque apprentissage produit un **modèle candidat**. Avant qu'il remplace le modèle actif, Cyward calcule le **diff** entre les deux : par machine, ce que le nouveau modèle accepterait de plus, et comment son profil change. L'utilisateur accepte ou refuse chaque machine. Une machine refusée voit ses fenêtres marquées suspectes et lève une alerte `baseline_rejected`.
+- **Sans réponse, rien ne change** : le modèle actif reste en place. Seul un diff vide (rien de nouveau) est activé automatiquement.
+- Les périodes d'une machine visée par une **alerte à règles** (scan, force brute, C2…) ne sont jamais apprises.
+- Une **dérive cumulée** (volume multiplié ou divisé par plus de `drift_factor` depuis le premier modèle validé) lève une alerte `baseline_drift` : elle bloque l'empoisonnement par petits pas.
+- Les modèles validés sont versionnés, avec **retour arrière**, et chaque décision est inscrite dans un **journal** (`decisions.jsonl`).
+
+**Mise en route :**
+1. Activer `[detection.anomaly]` avec un `data_dir`, et définir `web.token` : sans jeton, le dashboard ne permet ni de répondre ni de valider.
+2. Laisser observer : le premier apprentissage automatique a lieu après `learning_hours` (une semaine par défaut), ou plus tôt avec le bouton « Lancer un apprentissage ».
+3. Valider le premier modèle dans le panneau « Comportement normal » du dashboard.
+4. Rester quelques semaines en mode `observation` (anomalies en `info`, sans LLM) avant de passer en mode `alert`.
+
+Conception détaillée, choix et limites : [doc/conception-normalite.md](doc/conception-normalite.md).
+
+**MITRE :** couverture transverse, selon le comportement (découverte, exfiltration, C2…).
 
 ---
 
@@ -672,6 +743,7 @@ Le premier lancement télécharge environ 5 Go de modèle. Le dashboard est ensu
 - **Droits minimaux** : toutes les capacités sont retirées sauf `NET_RAW` et `NET_ADMIN`. S'y ajoutent `no-new-privileges` et un système de fichiers en lecture seule.
 - **Logs de l'hôte** : `/var/log/journal` et `/etc/machine-id` sont montés en lecture seule. Le `machine-id` permet à `journalctl` de reconnaître le journal de l'hôte comme le sien. Les systèmes sans journal persistant (pas de `/var/log/journal`) ne sont pas couverts.
 - **Configuration** : [`docker/cyward.toml`](docker/cyward.toml), monté dans `/etc/cyward/cyward.toml`. Une modification se prend en compte avec `docker compose restart cyward`.
+- **Apprentissage du comportement normal** : activé dans l'image, en mode observation. Ses données sont dans le volume `cyward-data` (`/var/lib/cyward`), seul emplacement accessible en écriture. Définir `web.token` pour pouvoir répondre et valider depuis le dashboard.
 - **Modèle** : pour en changer, modifie `llm.model` dans `docker/cyward.toml` **et** définis `CYWARD_MODEL` (dans `.env` ou l'environnement) avec la même valeur.
 - **GPU NVIDIA** : décommente le bloc `deploy` du service `ollama` (nécessite `nvidia-container-toolkit`).
 
@@ -831,6 +903,26 @@ Toutes les clés sont optionnelles. [`config.example.toml`](config.example.toml)
 
 Champs : `name`, `pattern` (regex Rust), `severity` (`info` à `critical`), `title`. Voir la section 3.7.
 
+### `[detection.anomaly]`
+
+Apprentissage du comportement normal (section 3.9).
+
+| Clé | Défaut | Description |
+|---|---|---|
+| `enabled` | `false` | Active l'apprentissage |
+| `mode` | `"observation"` | `observation` : anomalies en `info`, sans LLM ; `alert` : anomalies en `medium`, analysées par le LLM |
+| `window_secs` | `300` | Durée d'une fenêtre (un échantillon par machine active) |
+| `data_dir` | `""` | Dossier de persistance ; vide = en mémoire seulement, perdu à l'arrêt |
+| `min_training_samples` | `500` | Échantillons utilisables nécessaires pour apprendre |
+| `learning_hours` | `168` | Durée d'observation avant le premier apprentissage automatique |
+| `retrain_interval_hours` | `168` | Délai entre deux apprentissages automatiques |
+| `retention_days` | `28` | Conservation des échantillons |
+| `max_samples` | `200000` | Plafond du nombre d'échantillons |
+| `trees`, `sample_size` | `100`, `256` | Paramètres de l'Isolation Forest |
+| `contamination` | `0.005` | Part des données apprises au-dessus du seuil : fixe la sensibilité |
+| `drift_factor` | `10` | Facteur de dérive cumulée qui lève une alerte |
+| `max_versions` | `10` | Versions de modèle conservées pour le retour arrière |
+
 ### `[llm]`
 
 | Clé | Défaut | Description |
@@ -849,7 +941,7 @@ Champs : `name`, `pattern` (regex Rust), `severity` (`info` à `critical`), `tit
 | Clé | Défaut | Description |
 |---|---|---|
 | `listen` | `127.0.0.1:8080` | Adresse d'écoute du dashboard |
-| `token` | `""` | Jeton d'accès (obligatoire si le dashboard est exposé) |
+| `token` | `""` | Jeton d'accès. Obligatoire si le dashboard est exposé, et pour toute action (répondre aux anomalies, valider un modèle) |
 
 ---
 
@@ -862,6 +954,8 @@ Ouvre `http://127.0.0.1:8080`, ou `http://hôte:8080/?token=…` si un jeton est
 - **Bandeau du haut** : interface écoutée, paquets et débit, volume, paquets perdus, lignes de logs lues, état du modèle et nombre d'analyses faites. Le point vert devient rouge si la connexion à l'agent est perdue.
 - **Compteurs par sévérité** : cliquer sur l'un d'eux filtre la liste.
 - **Filtres** : recherche libre (IP, titre, type), source (réseau ou logs), verdict de l'IA.
+- **Panneau « Comportement normal »** (si l'apprentissage est activé) : modèle actif ou progression de l'apprentissage, fenêtres par statut, bouton « Lancer un apprentissage », retour à une version précédente. Quand un modèle candidat attend, son diff s'affiche machine par machine, avec « Accepter » ou « Refuser » pour chacune, « Tout accepter », « Tout refuser », et les machines peu actives repliées. Suivent les exceptions actives et les dernières décisions.
+- **Question « est-ce normal ? »** : dans le détail d'une anomalie, un motif, une portée, et les boutons « C'est normal » et « C'est suspect ». La réponse donnée s'affiche ensuite à la place.
 - **Liste des alertes** : mise à jour en direct, sans recharger la page. Une nouvelle alerte clignote brièvement. Le badge indique l'état du triage : en attente, verdict avec confiance, ou échec.
 - **Détail d'une alerte**, en cliquant dessus :
   - à gauche : description, source, cible, dates, occurrences et preuves brutes en JSON ;
@@ -879,6 +973,13 @@ Toutes les routes acceptent le jeton en `?token=` ou en `Authorization: Bearer �
 | `GET /api/alerts/{id}` | Une alerte |
 | `GET /api/stats` | `{ "stats": {...}, "alerts_by_severity": {...} }` |
 | `GET /api/events` | Flux SSE : `{"type":"new"\|"update","alert":{...}}` |
+| `GET /api/baseline` | État de l'apprentissage : mode, fenêtres par statut, modèle actif, candidat et son diff, versions, exceptions, décisions récentes (`{"enabled": false}` s'il est désactivé) |
+| `POST /api/alerts/{id}/feedback` | Réponse à une anomalie : `{"verdict": "normal"\|"suspect", "reason": "Sauvegarde", "scope": "once"\|"always"}` |
+| `POST /api/baseline/train` | Lance un apprentissage maintenant |
+| `POST /api/baseline/decision` | Valide le candidat : `{"accepted": ["192.168.1.20"], "rejected": ["192.168.1.35"]}`, chaque machine du diff dans l'une des listes |
+| `POST /api/baseline/rollback` | Revient à une version : `{"version": 3}` |
+
+Les routes `POST` exigent que `web.token` soit défini, et le jeton dans l'en-tête `Authorization: Bearer …`. Le jeton en paramètre d'URL est refusé pour elles, pour qu'une page tierce ne puisse pas agir à la place de l'utilisateur.
 
 Exemple, pour suivre les alertes en direct depuis un terminal :
 
@@ -909,15 +1010,17 @@ Format d'une alerte :
 
 **Types (`kind`) :**
 
-| Réseau | Logs |
-|---|---|
-| `port_scan`, `host_sweep`, `brute_force`, `syn_flood`, `beaconing`, `volume_anomaly`, `dns_tunneling`, `suspicious_dns` | `auth_brute_force`, `auth_compromise`, `privilege_escalation`, `account_change`, `custom_rule` |
+| Réseau | Logs | Apprentissage du comportement normal |
+|---|---|---|
+| `port_scan`, `host_sweep`, `brute_force`, `syn_flood`, `beaconing`, `volume_anomaly`, `dns_tunneling`, `suspicious_dns` | `auth_brute_force`, `auth_compromise`, `privilege_escalation`, `account_change`, `custom_rule` | `host_anomaly`, `baseline_drift`, `baseline_rejected` |
 
 `syn_flood` peut aussi venir des logs, quand c'est le noyau qui le signale.
 
 **États de triage (`triage`) :** `none` (pas envoyée), `pending`, `done`, `failed`.
 
-Les alertes sont gardées **en mémoire** : elles disparaissent au redémarrage. Pour les conserver ou les centraliser, interroge l'API, ou écoute le flux SSE et envoie les événements vers ton SIEM.
+**Réponse (`feedback`)** : présente sur une anomalie à laquelle l'utilisateur a répondu : `verdict`, `reason`, `scope`, `at`.
+
+Les alertes sont gardées **en mémoire** : elles disparaissent au redémarrage (l'apprentissage du comportement normal, lui, est persisté dans `data_dir`). Pour les conserver ou les centraliser, interroge l'API, ou écoute le flux SSE et envoie les événements vers ton SIEM.
 
 ---
 
@@ -1005,12 +1108,14 @@ Avec `AmbientCapabilities`, le `setcap` sur le binaire n'est pas nécessaire.
 cargo test
 ```
 
-22 tests couvrent :
+68 tests couvrent :
 - le parsing des paquets et du DNS ;
 - chaque détecteur, cas positifs et négatifs (un scan lent ou un trafic irrégulier ne doivent pas déclencher) ;
 - les règles de logs ;
 - la fusion des alertes ;
-- l'extraction du JSON renvoyé par le modèle.
+- l'extraction du JSON renvoyé par le modèle ;
+- l'apprentissage du comportement normal : l'Isolation Forest (point isolé, reproductibilité, sérialisation), les caractéristiques, le diff (bruit, nouveau comportement, dérive), le cycle de vie complet avec ses garde-fous (validation obligatoire, réponses, exceptions, refus, fenêtres exclues, retour arrière), la persistance ;
+- le contrôle d'accès des routes d'écriture et le résumé de la bannière.
 
 ### Simulation d'attaques
 
@@ -1066,6 +1171,8 @@ Les premiers jours, observe les alertes et ajuste la configuration :
 | Alertes DNS sur un antivirus ou un CDN qui utilise des noms aléatoires | Ajoute son domaine dans `dns.ignore_suffixes` |
 | Force brute sur un serveur de messagerie très sollicité | Monte `bruteforce.threshold` |
 | Trop d'alertes en attente d'IA | Passe `llm.min_severity` à `"high"` |
+| Anomalies de comportement répétées pour une activité légitime (sauvegarde du dimanche, mises à jour) | Réponds « C'est normal » avec la portée « désormais » : une exception évite la question jusqu'au prochain modèle, qui apprendra ce comportement |
+| Anomalies trop nombreuses en général | Reste en mode `observation`, baisse `contamination` (ex. `0.002`), ou allonge la période d'apprentissage |
 
 Le verdict « bénin » de l'IA aide à repérer ces cas, mais vérifie toujours avant d'exclure quoi que ce soit.
 

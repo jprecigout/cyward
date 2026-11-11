@@ -73,6 +73,30 @@
   .mitre a { color: var(--accent); font-family: var(--mono); font-size: 12px; margin-right: 8px; text-decoration: none; }
   .mitre a:hover { text-decoration: underline; }
   .empty { text-align: center; color: var(--muted); padding: 60px 20px; border: 1px dashed var(--border); border-radius: 10px; }
+  /* Apprentissage du comportement normal : panneau d'état, diff à valider, question « est-ce normal ? ». */
+  .baseline { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 18px; }
+  .baseline h3 { margin: 0 0 8px; font-size: 15px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .baseline p { margin: 4px 0; }
+  .line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  .btn { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 11px; font: inherit; font-size: 13px; cursor: pointer; }
+  .btn:hover:not(:disabled) { border-color: var(--accent); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { border-color: var(--accent); color: var(--accent); }
+  .btn.ok { border-color: var(--low); color: var(--low); }
+  .btn.danger { border-color: var(--critical); color: var(--critical); }
+  select.inp { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font: inherit; font-size: 13px; }
+  .candidate { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .host-diff { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: var(--panel-2); }
+  .host-diff.drift { border-color: var(--high); }
+  .host-diff.chosen-accept { border-left: 4px solid var(--low); }
+  .host-diff.chosen-reject { border-left: 4px solid var(--critical); }
+  .changes { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+  .changes td, .changes th { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--border); }
+  .changes th { color: var(--muted); font-weight: 500; }
+  .warn { color: var(--high); font-weight: 600; }
+  .ask { margin-top: 12px; padding: 10px 12px; border: 1px dashed var(--accent); border-radius: 8px; }
+  .msg { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .msg.err { color: var(--critical); }
   /* Petits écrans : compteurs sur deux lignes, détail en une colonne. */
   @media (max-width: 760px) {
     .counters { grid-template-columns: repeat(3, 1fr); }
@@ -112,6 +136,8 @@
       <option value="pending">Analyse en cours</option>
     </select>
   </div>
+  <!-- Apprentissage du comportement normal : rempli par renderBaseline(), masqué s'il est désactivé. -->
+  <section class="baseline" id="baseline" hidden></section>
   <!-- Remplie par renderAll(), puis mise à jour carte par carte par upsert(). -->
   <div class="alerts" id="alerts"></div>
 </main>
@@ -127,6 +153,21 @@ const LABELS = { critical: "Critique", high: "Haute", medium: "Moyenne", low: "B
 const token = new URLSearchParams(location.search).get("token");
 // Ajoute le jeton à un chemin d'API s'il y en a un.
 const q = (path) => token ? `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : path;
+// Les actions (répondre, valider) exigent le jeton côté serveur ; sans lui, les boutons sont désactivés.
+const canWrite = !!token;
+
+// Requête d'écriture : le jeton passe dans l'en-tête Authorization (le serveur refuse le jeton d'URL
+// pour les écritures, contre les requêtes forgées par une page tierce). Lève une erreur lisible.
+async function post(path, body) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(body ?? {}),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `erreur ${r.status}`);
+  return data;
+}
 
 // État de la page : alertes par identifiant, cartes dépliées, filtre de sévérité actif.
 const alerts = new Map();
@@ -213,7 +254,7 @@ function renderAlert(a, fresh = false) {
           el("span", {}, "Occurrences"), el("span", {}, a.count)),
         el("h4", {}, "Preuves"),
         el("pre", {}, JSON.stringify(a.evidence, null, 2))),
-      renderAnalysis(a)));
+      el("div", {}, renderAnalysis(a), a.kind === "host_anomaly" ? renderFeedback(a) : null)));
   return card;
 }
 
@@ -297,12 +338,171 @@ function connect() {
   es.onerror = () => dot.classList.add("off");
 }
 
+// ---------------------------------------------------------------------------------------------
+// Apprentissage du comportement normal (voir doc/conception-normalite.md)
+// ---------------------------------------------------------------------------------------------
+
+// Motifs proposés à la question « est-ce normal ? ».
+const REASONS = ["Mise à jour d'un jeu ou d'un logiciel", "Mise à jour du système", "Sauvegarde", "Nouvel appareil", "Nouvel usage", "Autre"];
+const NO_TOKEN = "Pour répondre, ouvrez le dashboard avec ?token=… (web.token doit être défini dans la configuration).";
+
+// Bloc « est-ce normal ? » d'une anomalie, ou la réponse déjà donnée.
+function renderFeedback(a) {
+  if (a.feedback) {
+    const f = a.feedback;
+    return el("div", { class: "ask" },
+      el("h4", {}, "Votre réponse"),
+      el("p", {}, `${f.verdict === "normal" ? "Normal" : "Suspect"}${f.reason ? ` · ${f.reason}` : ""}${f.verdict === "normal" ? (f.scope === "always" ? " · désormais pour cette machine" : " · cette fois seulement") : ""}`),
+      el("p", { class: "meta" }, fmtTime(f.at)));
+  }
+  const reason = el("select", { class: "inp" }, REASONS.map(r => el("option", {}, r)));
+  const scope = el("select", { class: "inp" },
+    el("option", { value: "once" }, "Cette fois seulement"),
+    el("option", { value: "always" }, "Désormais pour cette machine et ce type d'écart"));
+  const msg = el("div", { class: "msg" }, canWrite ? "Le modèle n'apprendra cette période que si vous la confirmez normale." : NO_TOKEN);
+  const send = async (verdict) => {
+    msg.className = "msg"; msg.textContent = "Envoi…";
+    try {
+      // Le motif et la portée ne concernent que la réponse « normal ».
+      const r = await post(`/api/alerts/${a.id}/feedback`, verdict === "normal" ? { verdict, reason: reason.value, scope: scope.value } : { verdict, scope: "once" });
+      msg.textContent = `${r.updated_windows} fenêtre(s) mise(s) à jour.`;
+      refreshBaseline();
+    } catch (e) { msg.className = "msg err"; msg.textContent = e.message; }
+  };
+  const disabled = canWrite ? {} : { disabled: "" };
+  return el("div", { class: "ask" },
+    el("h4", {}, "Est-ce normal ?"),
+    el("div", { class: "line" }, reason, scope),
+    el("div", { class: "line" },
+      el("button", { class: "btn ok", onclick: () => send("normal"), ...disabled }, "C'est normal"),
+      el("button", { class: "btn danger", onclick: () => send("suspect"), ...disabled }, "C'est suspect")),
+    msg);
+}
+
+// Choix accepter/refuser par machine du diff, conservés entre deux rafraîchissements du panneau.
+const choices = {};
+let lastBaseline = "";
+let baselineMsg = { text: "", err: false };
+
+// Panneau d'état : modèle actif ou progression de l'apprentissage, actions, diff à valider.
+function renderBaseline(b) {
+  const box = document.getElementById("baseline");
+  box.hidden = !b.enabled;
+  if (!b.enabled) return;
+  const s = b.samples, L = b.learning;
+  const usable = s.normal + s.confirmed_normal;
+  const act = async (label, fn) => {
+    baselineMsg = { text: `${label}…`, err: false }; lastBaseline = ""; refreshBaseline();
+    try { baselineMsg = { text: await fn(), err: false }; } catch (e) { baselineMsg = { text: e.message, err: true }; }
+    lastBaseline = ""; refreshBaseline();
+  };
+  const disabled = canWrite ? {} : { disabled: "" };
+
+  const status = b.active
+    ? el("p", {}, `Modèle actif v${b.active.version} · appris le ${fmtTime(b.active.trained_at)} · ${fmtNum(b.active.samples)} fenêtres, ${b.active.hosts} machine(s) · seuil ${b.active.threshold.toFixed(2)}`)
+    : el("p", {}, `Aucun modèle validé : apprentissage en cours (${L.covered_hours.toFixed(1)} h observées sur ${L.required_hours} h, ${fmtNum(usable)} fenêtres utilisables sur ${fmtNum(L.required_samples)}).`);
+
+  const versions = b.versions.filter(v => !b.active || v !== b.active.version);
+  const versionSel = el("select", { class: "inp" }, versions.map(v => el("option", { value: v }, `v${v}`)));
+
+  // replaceChildren afficherait « null » pour les blocs absents : on les retire d'abord.
+  box.replaceChildren(...[
+    el("h3", {}, "Comportement normal",
+      el("span", { class: "badge" }, b.mode === "observation" ? "mode observation" : "mode alerte"),
+      b.persistent ? null : el("span", { class: "badge pending" }, "en mémoire : perdu au redémarrage")),
+    status,
+    el("p", { class: "meta" }, `Fenêtres de ${b.window_secs} s : ${fmtNum(s.normal)} normales, ${fmtNum(s.flagged)} en attente de réponse, ${fmtNum(s.confirmed_normal)} confirmées normales, ${fmtNum(s.suspicious)} suspectes (jamais apprises).`),
+    el("div", { class: "line" },
+      el("button", { class: "btn primary", onclick: () => act("Apprentissage", async () => {
+        const r = await post("/api/baseline/train");
+        return r.result === "auto_activated" ? `Modèle v${r.version} activé : aucun nouveau comportement à valider.` : `Modèle candidat v${r.version} prêt : ${r.hosts} machine(s) à valider ci-dessous.`;
+      }), ...(b.candidate ? { disabled: "" } : disabled) }, "Lancer un apprentissage"),
+      versions.length ? [versionSel, el("button", { class: "btn", onclick: () => act("Retour arrière", async () => {
+        await post("/api/baseline/rollback", { version: Number(versionSel.value) });
+        return `Retour au modèle v${versionSel.value}.`;
+      }), ...disabled }, "Revenir à cette version")] : null),
+    baselineMsg.text ? el("div", { class: `msg${baselineMsg.err ? " err" : ""}` }, baselineMsg.text) : null,
+    canWrite ? null : el("div", { class: "msg" }, NO_TOKEN),
+    b.candidate ? renderCandidate(b.candidate, act, disabled) : null,
+    b.exceptions.length ? el("div", { class: "candidate" }, el("h4", {}, "Exceptions actives (jusqu'au prochain modèle)"),
+      el("ul", {}, b.exceptions.map(e => el("li", {}, `${e.host} : ${e.labels.join(", ")}${e.reason ? ` (${e.reason})` : ""}`)))) : null,
+    b.decisions.length ? el("div", { class: "candidate" }, el("h4", {}, "Dernières décisions"),
+      el("ul", {}, b.decisions.slice(0, 5).map(d => el("li", { class: "meta" }, `${fmtTime(d.at)} · ${d.host ? `${d.host} · ` : ""}${d.detail}${d.reason ? ` (${d.reason})` : ""}`)))) : null,
+  ].filter(x => x != null));
+}
+
+// Diff du modèle candidat : une carte par machine, à accepter ou refuser, puis validation globale.
+function renderCandidate(c, act, disabled) {
+  const d = c.diff;
+  const table = (rows) => el("table", { class: "changes" },
+    el("tr", {}, el("th", {}, "Caractéristique"), el("th", {}, "Avant"), el("th", {}, "Après")),
+    rows.map(r => el("tr", {}, el("td", {}, r.feature), el("td", {}, r.before), el("td", {}, r.after))));
+  const cards = d.hosts.map(h => {
+    const card = el("div", { class: `host-diff${h.drift.length ? " drift" : ""}${choices[h.host] ? ` chosen-${choices[h.host]}` : ""}` },
+      el("div", { class: "line" },
+        el("strong", {}, h.host),
+        h.new_host ? el("span", { class: "badge" }, "nouvelle machine") : null,
+        h.drift.length ? el("span", { class: "warn" }, "⚠ dérive cumulée depuis le premier modèle") : null),
+      el("p", { class: "meta" }, d.first_model
+        ? `Profil appris sur ${fmtNum(h.newly_accepted)} fenêtre(s)${h.first ? ` du ${fmtTime(h.first)} au ${fmtTime(h.last)}` : ""}.`
+        : h.newly_accepted ? `${fmtNum(h.newly_accepted)} fenêtre(s) que le modèle actif signalait et que le nouveau accepterait${h.first ? `, du ${fmtTime(h.first)} au ${fmtTime(h.last)}` : ""}.` : "Le profil habituel change."),
+      h.changes.length ? table(h.changes) : null,
+      h.drift.length ? [el("p", { class: "warn" }, "Dérive :"), table(h.drift)] : null,
+      el("div", { class: "line" },
+        el("button", { class: `btn ok`, onclick: () => { choices[h.host] = "accept"; lastBaseline = ""; refreshBaseline(); }, ...disabled }, "Accepter"),
+        el("button", { class: `btn danger`, onclick: () => { choices[h.host] = "reject"; lastBaseline = ""; refreshBaseline(); }, ...disabled }, "Refuser"),
+        choices[h.host] ? el("span", { class: "meta" }, choices[h.host] === "accept" ? "→ accepté" : "→ refusé") : null));
+    return card;
+  });
+  const missing = d.hosts.filter(h => !choices[h.host]).length;
+  const setAll = (v) => { d.hosts.forEach(h => { choices[h.host] = v; }); lastBaseline = ""; refreshBaseline(); };
+  // Machines peu actives (3 fenêtres au plus, sans changement de profil ni dérive) : repliées pour
+  // que l'attention se porte sur les machines qui comptent. Elles restent à décider une par une.
+  const minor = (h) => h.newly_accepted <= 3 && !h.changes.length && !h.drift.length;
+  const main = cards.filter((_, i) => !minor(d.hosts[i]));
+  const small = cards.filter((_, i) => minor(d.hosts[i]));
+  return el("div", { class: "candidate" },
+    el("h4", {}, `Modèle candidat v${c.model.version} à valider`),
+    el("p", {}, d.first_model
+      ? "Premier modèle : vérifiez que le profil appris de chaque machine correspond bien à son usage normal."
+      : "Le nouveau modèle accepterait les comportements suivants. Rien n'est accepté sans votre accord ; une machine refusée verra ces fenêtres marquées suspectes."),
+    el("div", { class: "line" },
+      el("button", { class: "btn", onclick: () => setAll("accept"), ...disabled }, "Tout accepter"),
+      el("button", { class: "btn", onclick: () => setAll("reject"), ...disabled }, "Tout refuser")),
+    main,
+    small.length ? el("details", {},
+      el("summary", { class: "meta" }, `${small.length} machine(s) peu active(s) : 3 fenêtres au plus, sans changement de profil`),
+      small) : null,
+    el("div", { class: "line" },
+      el("button", { class: "btn primary", onclick: () => act("Validation", async () => {
+        const accepted = d.hosts.filter(h => choices[h.host] === "accept").map(h => h.host);
+        const rejected = d.hosts.filter(h => choices[h.host] === "reject").map(h => h.host);
+        const r = await post("/api/baseline/decision", { accepted, rejected });
+        d.hosts.forEach(h => delete choices[h.host]);
+        return r.activated ? `Modèle v${r.activated} activé.${r.rejected.length ? ` ${r.rejected.length} machine(s) refusée(s).` : ""}` : "Pas assez de données après les refus : aucun modèle activé.";
+      }), ...(missing ? { disabled: "" } : disabled) }, "Valider ma décision"),
+      missing ? el("span", { class: "meta" }, `${missing} machine(s) sans décision`) : null));
+}
+
+// Relit l'état de l'apprentissage ; ne redessine que s'il a changé (préserve les saisies en cours).
+async function refreshBaseline() {
+  try {
+    const b = await (await fetch(q("/api/baseline"))).json();
+    const key = JSON.stringify(b) + JSON.stringify(choices) + baselineMsg.text;
+    if (key === lastBaseline) return;
+    lastBaseline = key;
+    renderBaseline(b);
+  } catch { /* l'indicateur de connexion suffit */ }
+}
+
 // Démarrage : écouteurs des filtres, premier rendu (liste vide), connexion, statistiques.
 for (const id of ["search", "source", "verdict"]) document.getElementById(id).addEventListener("input", renderAll);
 renderAll();
 connect();
 refreshStats();
 setInterval(refreshStats, 2000);
+refreshBaseline();
+setInterval(refreshBaseline, 5000);
 </script>
 </body>
 </html>

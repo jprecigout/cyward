@@ -17,24 +17,26 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
 
   | Module | Dépend de |
   |---|---|
-  | `detect/` | `alert`, `capture` (`PacketMeta`), `config` |
+  | `detect/` | `alert`, `anomaly`, `capture` (`PacketMeta`), `config` |
+  | `anomaly/` | `alert`, `config` |
   | `logs.rs` | `alert`, `config`, `stats` |
   | `llm.rs` | `alert`, `config`, `stats` |
-  | `web.rs` | `alert`, `stats` |
+  | `web.rs` | `alert`, `anomaly`, `stats` |
 
-  Les producteurs d'alertes (`detect/`, `logs.rs`) ne dépendent jamais des consommateurs (`llm`, `web`), et inversement. Seul `main.rs` assemble le tout (racine de composition).
-- **Logique pure séparée des entrées/sorties** : le parsing et la décision (`parse_packet`, `parse_dns_query`, `LogAnalyzer::analyze`, `parse_analysis`, les détecteurs) ne font aucune I/O. C'est ce qui les rend testables sans réseau, sans fichier, sans LLM. Les I/O (sockets, sous-processus, HTTP) restent en bordure.
+  Les producteurs d'alertes (`detect/`, `logs.rs`) ne dépendent jamais des consommateurs (`llm`, `web`), et inversement. `anomaly/` (apprentissage du comportement normal) ne dépend ni de `detect`, ni de `llm`, ni de `web` : ce sont eux qui l'utilisent. Seul `main.rs` assemble le tout (racine de composition).
+- **Logique pure séparée des entrées/sorties** : le parsing et la décision (`parse_packet`, `parse_dns_query`, `LogAnalyzer::analyze`, `parse_analysis`, les détecteurs, et dans `anomaly/` les caractéristiques, l'Isolation Forest et le diff) ne font aucune I/O. C'est ce qui les rend testables sans réseau, sans fichier, sans LLM. Les I/O (sockets, sous-processus, HTTP) restent en bordure.
 - **Favoriser les design patterns déjà en place**, et en réutiliser un plutôt que d'inventer une nouvelle mécanique :
 
   | Pattern | Où | À réutiliser pour |
   |---|---|---|
   | Strategy (trait + objets `Box<dyn …>`) | `trait Detector`, `Engine` | Tout nouveau détecteur ou analyseur interchangeable |
   | Builder | `Alert::new(...).src(...).dst(...).evidence(...)` | Construire des objets à nombreux champs optionnels |
-  | Façade / point d'entrée unique | `AlertSink::emit` | Tout ce qui produit des alertes : ne jamais écrire directement dans le store ou la file LLM |
+  | Façade / point d'entrée unique | `AlertSink::emit` ; `Baseline` (`anomaly/baseline.rs`) | Tout ce qui produit des alertes : ne jamais écrire directement dans le store ou la file LLM. Tout ce qui touche au comportement normal passe par `Baseline`, qui applique les garde-fous de validation |
   | Observer (publication/abonnement) | `AlertStore` + `broadcast` → clients SSE | Diffuser des événements à plusieurs consommateurs |
   | Producteur/consommateur (pipeline par canaux) | capture → moteur, sources de logs → analyseur, sink → LLM | Découpler un producteur rapide d'un consommateur lent (canal borné, `try_send` si le producteur ne doit pas bloquer) |
-  | Middleware (chaîne de responsabilité) | authentification axum (`web.rs`) | Comportements transverses du serveur web |
+  | Middleware (chaîne de responsabilité) | `auth`, et `write_guard` sur les routes d'écriture (`web.rs`) | Comportements transverses du serveur web ; toute nouvelle route d'écriture va dans le routeur protégé par `write_guard` |
   | Superviseur | `logs::supervise` | Tâche externe à relancer après une panne |
+  | Repository | `Storage` (`anomaly/storage.rs`) | Toute persistance sur disque : le reste du code ne connaît ni les fichiers ni leur format |
 
 - **Ouvert à l'extension, fermé à la modification** : une nouvelle détection s'ajoute en écrivant une nouvelle implémentation et en l'enregistrant (`Engine::new`), pas en ajoutant des cas dans le code existant.
 - **Les types plutôt que des valeurs brutes** : des enums (`Severity`, `AlertKind`, `TriageStatus`, `Proto`) plutôt que des chaînes ou des booléens ; une struct de configuration avec `#[serde(default)]` et `impl Default` par sous-système.
@@ -108,7 +110,17 @@ logs.rs (journalctl -f -o json / tail -F, sous-processus relancés) ─► LogAn
                                                                                                           ▼
                                      AlertSink::emit ─► AlertStore (dédoublonnage + broadcast) ─► web.rs (SSE)
                                             └─ si sévérité ≥ llm.min_severity ─► file mpsc<u64> ─► llm.rs
+
+detect/anomaly.rs (HostAnomaly) ─► anomaly::Baseline ◄─ anomaly::trainer (périodique) ◄─ web.rs (réponses, validation)
+                                         └─► anomaly::Storage (data_dir)
 ```
+
+**Apprentissage du comportement normal** (`src/anomaly/`, désactivé par défaut) : conception et garde-fous dans `doc/conception-normalite.md`, à lire avant d'y toucher. Invariants à préserver :
+- rien n'entre dans le comportement normal sans validation humaine : une fenêtre `flagged` n'est jamais apprise tant qu'elle est sans réponse, un modèle candidat n'est activé qu'après `decide` (sauf diff vide), aucun apprentissage n'est lancé tant qu'un candidat attend ;
+- les fenêtres touchées par une alerte à règles (`!AlertKind::is_learning()`) sont exclues de l'apprentissage (`trainer::tainted_by_rules`) ;
+- le LLM peut suggérer un motif, jamais valider ;
+- l'Isolation Forest isole immédiatement une valeur hors de la plage vue à un nœud (correctif du « masquage », voir `iforest.rs`) ; le diff ignore le bruit de seuil (2 × `contamination`, au moins 3 fenêtres) ;
+- les données de test de l'apprentissage doivent varier de façon continue (`model::tests::sample`) : des valeurs répétées faussent le seuil par des ex aequo.
 
 Points qui demandent de lire plusieurs fichiers pour être compris :
 

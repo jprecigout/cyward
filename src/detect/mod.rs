@@ -6,16 +6,17 @@
 //! Pour ajouter un détecteur : créer un module qui implémente [`Detector`], puis l'ajouter
 //! à la liste dans [`Engine::new`].
 
+mod anomaly;
 mod beacon;
 mod dns;
 mod scan;
 mod volume;
 
-use std::{collections::HashSet, net::IpAddr};
+use std::{collections::HashSet, net::IpAddr, sync::Arc};
 
 use chrono::{DateTime, Utc};
 
-use crate::{alert::Alert, capture::PacketMeta, config::DetectionConfig};
+use crate::{alert::Alert, anomaly::baseline::Baseline, capture::PacketMeta, config::DetectionConfig};
 
 /// Comportement commun des détecteurs réseau.
 ///
@@ -37,20 +38,21 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(cfg: &DetectionConfig) -> Self {
-        Self {
-            // Certains détecteurs reçoivent toute la DetectionConfig pour accéder à `is_local`.
-            detectors: vec![
-                Box::new(scan::PortScan::new(cfg.portscan.clone(), cfg.clone())),
-                Box::new(scan::BruteForce::new(cfg.bruteforce.clone())),
-                Box::new(scan::SynFlood::new(cfg.synflood.clone())),
-                Box::new(beacon::Beaconing::new(cfg.beacon.clone(), cfg.clone())),
-                Box::new(volume::Volume::new(cfg.volume.clone(), cfg.clone())),
-                Box::new(dns::Dns::new(cfg.dns.clone())),
-            ],
-            whitelist: cfg.whitelist.iter().copied().collect(),
-            last_tick: 0.0,
+    /// `baseline` : apprentissage du comportement normal, si activé (`detection.anomaly`).
+    pub fn new(cfg: &DetectionConfig, baseline: Option<Arc<Baseline>>) -> Self {
+        // Certains détecteurs reçoivent toute la DetectionConfig pour accéder à `is_local`.
+        let mut detectors: Vec<Box<dyn Detector>> = vec![
+            Box::new(scan::PortScan::new(cfg.portscan.clone(), cfg.clone())),
+            Box::new(scan::BruteForce::new(cfg.bruteforce.clone())),
+            Box::new(scan::SynFlood::new(cfg.synflood.clone())),
+            Box::new(beacon::Beaconing::new(cfg.beacon.clone(), cfg.clone())),
+            Box::new(volume::Volume::new(cfg.volume.clone(), cfg.clone())),
+            Box::new(dns::Dns::new(cfg.dns.clone())),
+        ];
+        if let Some(b) = baseline {
+            detectors.push(Box::new(anomaly::HostAnomaly::new(b, cfg.clone())));
         }
+        Self { detectors, whitelist: cfg.whitelist.iter().copied().collect(), last_tick: 0.0 }
     }
 
     /// Fait passer un paquet dans tous les détecteurs et renvoie les alertes produites.

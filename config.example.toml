@@ -58,6 +58,31 @@ ignore_suffixes = ["in-addr.arpa", "ip6.arpa", "local"]
 window_secs = 300
 failures_threshold = 6
 
+# Apprentissage du comportement normal par Isolation Forest, avec validation humaine.
+# Conception : doc/conception-normalite.md. Pour répondre et valider depuis le dashboard,
+# web.token doit être défini.
+[detection.anomaly]
+enabled = false
+# observation : anomalies en « info », sans LLM ; alert : anomalies en « medium », analysées par le LLM.
+mode = "observation"
+# Une fenêtre = un échantillon par machine interne active.
+window_secs = 300.0
+# Dossier de persistance. Vide = en mémoire seulement (tout est perdu à l'arrêt).
+data_dir = ""
+min_training_samples = 500
+# Durée d'observation avant le premier apprentissage automatique (une semaine : cycle complet).
+learning_hours = 168.0
+retrain_interval_hours = 168.0
+retention_days = 28.0
+max_samples = 200000
+trees = 100
+sample_size = 256
+# Part des données d'apprentissage au-dessus du seuil : fixe la sensibilité.
+contamination = 0.005
+# Une médiane de volume multipliée ou divisée par plus que ce facteur depuis le premier modèle validé lève une alerte de dérive.
+drift_factor = 10.0
+max_versions = 10
+
 # Règles personnalisées sur les logs. Un groupe nommé `ip` devient la source de l'alerte.
 # [[detection.custom_log_rules]]
 # name = "wordpress-login"

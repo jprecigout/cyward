@@ -13,6 +13,7 @@
 
 // Déclaration des modules du crate (un fichier ou dossier par module dans src/).
 mod alert;
+mod anomaly;
 mod banner;
 mod capture;
 mod config;
@@ -35,8 +36,9 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     alert::{AlertSink, AlertStore},
+    anomaly::baseline::Baseline,
     capture::PacketMeta,
-    config::Config,
+    config::{AnomalyMode, Config},
     detect::Engine,
     stats::Stats,
 };
@@ -130,8 +132,9 @@ async fn main() -> Result<()> {
                 (true, "") => "interface de la route par défaut".to_string(),
                 (true, name) => name.to_string(),
             };
-            print!("{}", banner::render(&banner_info(&cfg, capture), banner::use_color()));
-            run(cfg).await
+            let baseline = open_baseline(&cfg)?;
+            print!("{}", banner::render(&banner_info(&cfg, capture, baseline.as_deref()), banner::use_color()));
+            run(cfg, baseline).await
         }
         Command::Replay { file, serve } => replay(cfg, file, serve).await,
     }
@@ -139,8 +142,9 @@ async fn main() -> Result<()> {
 
 /// Lignes de résumé affichées sous la bannière : ce que l'agent va réellement faire, une fois
 /// la configuration et les options de la ligne de commande appliquées. `capture` décrit la
-/// source des paquets (interface ou fichier rejoué).
-fn banner_info(cfg: &Config, capture: String) -> Vec<(&'static str, String)> {
+/// source des paquets (interface ou fichier rejoué) ; `baseline` l'apprentissage du
+/// comportement normal, s'il est activé.
+fn banner_info(cfg: &Config, capture: String, baseline: Option<&Baseline>) -> Vec<(&'static str, String)> {
     let dashboard = if cfg.web.token.is_empty() {
         format!("http://{}", cfg.web.listen)
     } else {
@@ -160,24 +164,48 @@ fn banner_info(cfg: &Config, capture: String) -> Vec<(&'static str, String)> {
         "désactivés".to_string()
     };
     let model = if cfg.llm.enabled { cfg.llm.model.clone() } else { "désactivé".to_string() };
-    vec![("Dashboard", dashboard), ("Capture", capture), ("Logs", logs), ("Modèle IA", model)]
+    // Ex. « observation · modèle v3 » ou « alerte · apprentissage en cours ».
+    let normality = match baseline {
+        None => "désactivée".to_string(),
+        Some(b) => {
+            let mode = match b.config().mode {
+                AnomalyMode::Observation => "observation",
+                AnomalyMode::Alert => "alerte",
+            };
+            let model = b.active_version().map(|v| format!("modèle v{v}")).unwrap_or_else(|| "apprentissage en cours".into());
+            format!("{mode} · {model}")
+        }
+    };
+    vec![("Dashboard", dashboard), ("Capture", capture), ("Logs", logs), ("Modèle IA", model), ("Normalité", normality)]
+}
+
+/// Ouvre l'apprentissage du comportement normal s'il est activé (et recharge son état disque).
+fn open_baseline(cfg: &Config) -> Result<Option<Arc<Baseline>>> {
+    if !cfg.detection.anomaly.enabled {
+        return Ok(None);
+    }
+    Ok(Some(Arc::new(Baseline::open(cfg.detection.anomaly.clone())?)))
 }
 
 /// Démarre la partie commune à `run` et `replay --serve` : stockage des alertes,
-/// worker LLM (si activé) et serveur web. Renvoie le point d'entrée des alertes.
-fn start_pipeline(cfg: &Config, stats: &Arc<Stats>) -> Result<AlertSink> {
+/// worker LLM (si activé), entraîneur du comportement normal (si activé) et serveur web.
+/// Renvoie le point d'entrée des alertes.
+fn start_pipeline(cfg: &Config, stats: &Arc<Stats>, baseline: Option<Arc<Baseline>>) -> Result<AlertSink> {
     *stats.started_at.lock() = Some(chrono::Utc::now());
     let store = Arc::new(AlertStore::new(5000, cfg.detection.alert_cooldown_secs));
     // `triage` est l'émetteur de la file vers le LLM ; None si le LLM est désactivé.
     let triage = if cfg.llm.enabled { Some(llm::spawn(cfg.llm.clone(), store.clone(), stats.clone())?) } else { None };
     let sink = AlertSink::new(store.clone(), triage, cfg.llm.min_severity);
+    if let Some(b) = &baseline {
+        anomaly::trainer::spawn(b.clone(), sink.clone());
+    }
 
     // Le serveur web tourne dans sa propre tâche ; une erreur (port occupé…) est journalisée
     // sans arrêter la détection.
     let (listen, token) = (cfg.web.listen.clone(), cfg.web.token.clone());
-    let stats = stats.clone();
+    let (web_sink, stats) = (sink.clone(), stats.clone());
     tokio::spawn(async move {
-        if let Err(e) = web::serve(&listen, token, store, stats).await {
+        if let Err(e) = web::serve(&listen, token, web_sink, stats, baseline).await {
             tracing::error!("dashboard arrêté : {e:#}");
         }
     });
@@ -185,9 +213,9 @@ fn start_pipeline(cfg: &Config, stats: &Arc<Stats>) -> Result<AlertSink> {
 }
 
 /// Mode surveillance continue (`cyward run`).
-async fn run(cfg: Config) -> Result<()> {
+async fn run(cfg: Config, baseline: Option<Arc<Baseline>>) -> Result<()> {
     let stats = Arc::new(Stats::default());
-    let sink = start_pipeline(&cfg, &stats)?;
+    let sink = start_pipeline(&cfg, &stats, baseline.clone())?;
 
     if cfg.capture.enabled {
         let iface = capture::pick_interface(&cfg.capture.interface)?;
@@ -197,7 +225,7 @@ async fn run(cfg: Config) -> Result<()> {
         // abandonne des paquets plutôt que de bloquer (voir capture::spawn_live).
         let (tx, rx) = mpsc::channel(cfg.capture.queue_size);
         capture::spawn_live(iface, cfg.capture.promiscuous, tx, stats.clone())?;
-        tokio::spawn(run_engine(Engine::new(&cfg.detection), rx, sink.clone(), true));
+        tokio::spawn(run_engine(Engine::new(&cfg.detection, baseline.clone()), rx, sink.clone(), true));
     }
 
     if cfg.logs.enabled {
@@ -218,6 +246,10 @@ async fn run(cfg: Config) -> Result<()> {
     // Toutes les tâches tournent en arrière-plan ; on attend simplement Ctrl+C (ou SIGINT).
     tokio::signal::ctrl_c().await?;
     tracing::info!("arrêt");
+    // Sauvegarde finale : les fenêtres apprises depuis la dernière sauvegarde périodique.
+    if let Some(b) = &baseline {
+        b.save()?;
+    }
     Ok(())
 }
 
@@ -228,6 +260,7 @@ async fn replay(mut cfg: Config, file: PathBuf, serve: bool) -> Result<()> {
     let stats = Arc::new(Stats::default());
     // Le nom du fichier s'affiche à la place de l'interface dans le dashboard.
     *stats.interface.lock() = file.file_name().map(|n| n.to_string_lossy().into_owned());
+    let baseline = open_baseline(&cfg)?;
     let sink = if serve {
         // Bannière seulement avec --serve : sans, la sortie est un rapport destiné à être lu
         // ou traité par un script, que la bannière encombrerait.
@@ -235,8 +268,8 @@ async fn replay(mut cfg: Config, file: PathBuf, serve: bool) -> Result<()> {
         // résumé de la bannière affiche « désactivés » plutôt que « journald ».
         cfg.logs.enabled = false;
         let source = format!("rejeu de {}", file.display());
-        print!("{}", banner::render(&banner_info(&cfg, source), banner::use_color()));
-        start_pipeline(&cfg, &stats)?
+        print!("{}", banner::render(&banner_info(&cfg, source, baseline.as_deref()), banner::use_color()));
+        start_pipeline(&cfg, &stats, baseline.clone())?
     } else {
         // Store seul, sans dashboard ni LLM, assez grand pour garder toutes les alertes du fichier.
         AlertSink::new(Arc::new(AlertStore::new(100_000, cfg.detection.alert_cooldown_secs)), None, cfg.llm.min_severity)
@@ -244,10 +277,14 @@ async fn replay(mut cfg: Config, file: PathBuf, serve: bool) -> Result<()> {
 
     let (tx, rx) = mpsc::channel(4096);
     // `live = false` : pas de tick sur l'horloge murale, seul le temps du pcap compte.
-    let engine = tokio::spawn(run_engine(Engine::new(&cfg.detection), rx, sink.clone(), false));
+    let engine = tokio::spawn(run_engine(Engine::new(&cfg.detection, baseline.clone()), rx, sink.clone(), false));
     capture::replay(&file, tx, stats.clone()).await?;
     // `replay` a rendu l'émetteur du canal : le moteur termine dès qu'il a vidé la file.
     engine.await?;
+    // Les fenêtres du pcap enrichissent l'apprentissage : on les enregistre tout de suite.
+    if let Some(b) = &baseline {
+        b.save()?;
+    }
 
     let alerts = sink.store.list(usize::MAX);
     let s = stats.snapshot();
@@ -311,11 +348,12 @@ mod tests {
     // Configuration par défaut : dashboard sans jeton, journald seul, modèle par défaut.
     #[test]
     fn banner_info_default_config() {
-        let info = banner_info(&Config::default(), "eth0".into());
+        let info = banner_info(&Config::default(), "eth0".into(), None);
         assert_eq!(value(&info, "Dashboard"), "http://127.0.0.1:8080");
         assert_eq!(value(&info, "Capture"), "eth0");
         assert_eq!(value(&info, "Logs"), "journald");
         assert_eq!(value(&info, "Modèle IA"), Config::default().llm.model);
+        assert_eq!(value(&info, "Normalité"), "désactivée");
     }
 
     // Étages désactivés, jeton défini, fichiers de logs : le résumé le reflète, sans jamais
@@ -326,13 +364,21 @@ mod tests {
         cfg.web.token = "secret".into();
         cfg.logs.files = vec!["/var/log/auth.log".into(), "/var/log/nginx/access.log".into()];
         cfg.llm.enabled = false;
-        let info = banner_info(&cfg, "désactivée".into());
+        let info = banner_info(&cfg, "désactivée".into(), None);
         assert_eq!(value(&info, "Dashboard"), "http://127.0.0.1:8080/?token=…");
         assert!(info.iter().all(|(_, v)| !v.contains("secret")));
         assert_eq!(value(&info, "Logs"), "journald + 2 fichier(s)");
         assert_eq!(value(&info, "Modèle IA"), "désactivé");
 
         cfg.logs.enabled = false;
-        assert_eq!(value(&banner_info(&cfg, String::new()), "Logs"), "désactivés");
+        assert_eq!(value(&banner_info(&cfg, String::new(), None), "Logs"), "désactivés");
+    }
+
+    // Apprentissage activé : le mode et l'état du modèle apparaissent dans le résumé.
+    #[test]
+    fn banner_info_shows_normality_state() {
+        let b = Baseline::in_memory(config::AnomalyConfig { enabled: true, mode: AnomalyMode::Alert, ..Default::default() });
+        let info = banner_info(&Config::default(), "eth0".into(), Some(&b));
+        assert_eq!(value(&info, "Normalité"), "alerte · apprentissage en cours");
     }
 }
