@@ -27,8 +27,14 @@ data_dir = "/var/lib/cyward"
 enabled = true
 # Le service ollama publie son port sur le localhost de l'hôte, que Cyward voit grâce au réseau hôte.
 base_url = "http://127.0.0.1:11434/v1"
-# Doit être identique à CYWARD_MODEL dans compose.yaml / .env.
-model = "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
+# Doit être identique à CYWARD_MODEL (compose.yaml, ou .env s'il le redéfinit). Pour revenir à
+# Q4_K_M : décommenter la seconde ligne, commenter la première, et mettre la même valeur dans .env :
+#   CYWARD_MODEL=hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M
+model = "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:IQ4_XS"
+# model = "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
+# info | low | medium | high | critical. Sur une machine modeste, « high » n'analyse que les
+# attaques caractérisées et ménage le CPU, mais les comportements suspects (balises, DNS, ARP hors
+# IP protégées, anomalies en mode alert) ne reçoivent plus de verdict de l'IA.
 min_severity = "medium"
 language = "français"
 

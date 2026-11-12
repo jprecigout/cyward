@@ -112,10 +112,16 @@ max_versions = 10
 enabled = true
 # Toute API compatible OpenAI : Ollama, llama.cpp (llama-server), vLLM…
 base_url = "http://127.0.0.1:11434/v1"
-model = "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
+# Modèle par défaut : quantification IQ4_XS (~4,5 Go, ~5,5 à 7 Go de RAM). Pour revenir à la
+# référence Q4_K_M (~4,9 Go, ~6 à 8 Go de RAM, qualité légèrement meilleure), inverser les deux
+# lignes suivantes, puis : ollama pull hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M
+model = "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:IQ4_XS"
+# model = "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
 api_key = ""
 timeout_secs = 300
-# info | low | medium | high | critical
+# info | low | medium | high | critical. Sur une machine modeste, « high » n'analyse que les
+# attaques caractérisées et ménage le CPU, mais les comportements suspects (balises, DNS, ARP hors
+# IP protégées, anomalies en mode alert) ne reçoivent plus de verdict de l'IA.
 min_severity = "medium"
 language = "français"
 queue_size = 32

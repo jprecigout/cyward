@@ -721,15 +721,32 @@ Conception détaillée, choix et limites : [doc/conception-normalite.md](doc/con
 
 [Foundation-Sec-8B-Instruct](https://huggingface.co/fdtn-ai/Foundation-Sec-8B-Instruct) est un modèle publié en open weights par **Cisco Foundation AI**. Il est construit sur **Llama 3.1 8B**, pré-entraîné sur un large corpus de cybersécurité (CVE, rapports de menaces, MITRE ATT&CK, documentation d'outils de sécurité), puis ajusté pour suivre des instructions. Il est donc plus pertinent qu'un modèle généraliste de même taille pour qualifier une alerte et citer les bonnes techniques ATT&CK.
 
-Cyward utilise par défaut une **quantification Q4_K_M au format GGUF**, publiée par mradermacher sur Hugging Face :
+Cyward utilise par défaut une **quantification IQ4_XS au format GGUF**, publiée par mradermacher sur Hugging Face. Elle est un peu plus légère que la Q4_K_M, la référence habituelle, pour une qualité quasi identique :
 
-| | |
-|---|---|
-| Taille sur disque | ~5 Go |
-| RAM nécessaire | ~6 à 8 Go |
-| GPU | facultatif (NVIDIA, AMD ou Apple accélèrent fortement) |
-| Durée d'une analyse sur CPU 8–12 cœurs | ~20 à 90 s |
-| Durée avec GPU | quelques secondes |
+| | IQ4_XS (défaut) | Q4_K_M |
+|---|---|---|
+| Taille sur disque | 4,5 Go | 4,9 Go |
+| RAM nécessaire | ~5,5 à 7 Go | ~6 à 8 Go |
+| GPU | facultatif (NVIDIA, AMD ou Apple accélèrent fortement) | idem |
+| Durée d'une analyse sur CPU 8–12 cœurs | ~20 à 90 s | idem, un peu plus lente |
+| Durée avec GPU | quelques secondes | idem |
+
+**Machine modeste :** `llm.min_severity = "high"` ne fait analyser que les alertes hautes et critiques. Le CPU est moins sollicité, mais les comportements suspects (balises, DNS, ARP hors IP protégées, anomalies en mode `alert`) n'ont plus de verdict de l'IA ; ils restent visibles dans le dashboard et servent de contexte au modèle pour les alertes du même hôte. Ce réglage est propre à une machine : mets-le dans ta configuration locale (avec Docker, `docker/cyward.local.toml`, section 5.4), pas dans les fichiers versionnés.
+
+**Revenir à Q4_K_M**, si la machine a de la marge :
+
+```bash
+ollama pull hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M
+```
+
+puis, dans la configuration, la ligne déjà prête en commentaire dans `config.example.toml` :
+
+```toml
+[llm]
+model = "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
+```
+
+Avec Docker, voir la section 5.4 (`CYWARD_MODEL`). Les autres quantifications publiées (Q3_K_M, Q5_K_M, Q8_0…) se choisissent de la même façon, en changeant le suffixe.
 
 Licence : consulte la fiche Hugging Face du modèle avant un usage commercial. Cisco recommande de l'utiliser avec une supervision humaine.
 
@@ -739,7 +756,7 @@ Cyward parle l'**API compatible OpenAI** (`POST /v1/chat/completions`, `GET /v1/
 
 | Serveur | `base_url` | Exemple de `model` |
 |---|---|---|
-| Ollama | `http://127.0.0.1:11434/v1` | `hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M` |
+| Ollama | `http://127.0.0.1:11434/v1` | `hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:IQ4_XS` |
 | llama.cpp (`llama-server -m modele.gguf`) | `http://127.0.0.1:8080/v1` | nom du fichier chargé |
 | vLLM | `http://127.0.0.1:8000/v1` | `fdtn-ai/Foundation-Sec-8B-Instruct` |
 
@@ -801,13 +818,13 @@ Aucune bibliothèque système n'est nécessaire : ni libpcap, ni OpenSSL.
 curl -fsSL https://ollama.com/install.sh | sh
 ```
 ```bash
-ollama pull hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M
+ollama pull hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:IQ4_XS
 ```
 
 Pour vérifier que le modèle répond :
 
 ```bash
-ollama run hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M "Qu'est-ce que la technique MITRE T1110 ?"
+ollama run hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:IQ4_XS "Qu'est-ce que la technique MITRE T1110 ?"
 ```
 
 ### 5.3 L'agent
@@ -872,7 +889,10 @@ Le premier lancement télécharge environ 5 Go de modèle. Le dashboard est ensu
   ```
 - **Historique des alertes** : activé dans l'image, dans `/var/lib/cyward/alerts.db` (volume `cyward-data`).
 - **Apprentissage du comportement normal** : activé dans l'image, en mode observation. Ses données sont dans le volume `cyward-data` (`/var/lib/cyward`), seul emplacement accessible en écriture. Définir `web.token` pour pouvoir répondre et valider depuis le dashboard.
-- **Modèle** : pour en changer, modifie `llm.model` dans `docker/cyward.toml` **et** définis `CYWARD_MODEL` (dans `.env` ou l'environnement) avec la même valeur.
+- **Modèle** : IQ4_XS par défaut. Pour en changer, modifie `llm.model` dans `docker/cyward.toml` (la ligne Q4_K_M y est prête en commentaire) **et** définis `CYWARD_MODEL` avec la même valeur dans `.env`, puis `docker compose up -d`. Pour revenir à Q4_K_M, la ligne à mettre dans `.env` :
+  ```
+  CYWARD_MODEL=hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M
+  ```
 - **GPU NVIDIA** : décommente le bloc `deploy` du service `ollama` (nécessite `nvidia-container-toolkit`).
 
 **Rejouer un pcap avec l'image :**
@@ -923,7 +943,7 @@ Sans `-c`, toutes les valeurs par défaut s'appliquent.
   Dashboard   http://127.0.0.1:8080
   Capture     interface de la route par défaut
   Logs        journald
-  Modèle IA   hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M
+  Modèle IA   hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:IQ4_XS
 ```
 
 - Dans un terminal, elle est en couleur : bouclier bleu, pulsation verte, nom en dégradé.
@@ -1072,10 +1092,10 @@ Apprentissage du comportement normal (section 3.11).
 |---|---|---|
 | `enabled` | `true` | Active le triage IA |
 | `base_url` | `http://127.0.0.1:11434/v1` | Endpoint compatible OpenAI |
-| `model` | `hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M` | Nom du modèle côté serveur |
+| `model` | `hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:IQ4_XS` | Nom du modèle côté serveur (Q4_K_M : section 4.1) |
 | `api_key` | `""` | Clé éventuelle |
 | `timeout_secs` | `300` | Délai maximal d'une analyse |
-| `min_severity` | `"medium"` | Sévérité minimale envoyée au modèle |
+| `min_severity` | `"medium"` | Sévérité minimale envoyée au modèle (`"high"` pour ménager le CPU d'une machine modeste, section 4.1) |
 | `language` | `"français"` | Langue des réponses |
 | `queue_size` | `32` | Alertes en attente d'analyse |
 
@@ -1333,7 +1353,7 @@ Avec `AmbientCapabilities`, le `setcap` sur le binaire n'est pas nécessaire.
 cargo test
 ```
 
-149 tests couvrent :
+152 tests couvrent :
 - le parsing des paquets, du DNS et de l'ARP, et des formats de listes de menaces ;
 - chaque détecteur, cas positifs et négatifs (un scan lent ou un trafic irrégulier ne doivent pas déclencher), et le plafond mémoire des détecteurs exposés aux adresses usurpées ;
 - les règles de logs, cas positifs et négatifs (lignes ordinaires, regex personnalisée invalide), et le décodage des lignes journald et texte ;
@@ -1406,7 +1426,7 @@ Les premiers jours, observe les alertes et ajuste la configuration :
 | Usurpation ARP sur deux cartes d'une même machine (bonding, Wi-Fi + Ethernet) ou une VM migrée | Vérifie les deux MAC des preuves ; mets l'IP en `whitelist` si le conflit est légitime |
 | Trafic entrant d'IP listées trop fréquent | C'est un signal bas, non envoyé au LLM ; filtre la sévérité `low` dans le dashboard |
 | Force brute sur un serveur de messagerie très sollicité | Monte `bruteforce.threshold` |
-| Trop d'alertes en attente d'IA | Passe `llm.min_severity` à `"high"` |
+| Trop d'alertes en attente d'IA, ou CPU saturé par les analyses | Passe `llm.min_severity` à `"high"` |
 | Anomalies de comportement répétées pour une activité légitime (sauvegarde du dimanche, mises à jour) | Réponds « C'est normal » avec la portée « désormais » : une exception évite la question jusqu'au prochain modèle, qui apprendra ce comportement |
 | Anomalies trop nombreuses en général | Reste en mode `observation`, baisse `contamination` (ex. `0.002`), ou allonge la période d'apprentissage |
 

@@ -422,10 +422,14 @@ impl Default for LlmConfig {
             enabled: true,
             // Port par défaut d'Ollama, qui expose l'API OpenAI sous /v1.
             base_url: "http://127.0.0.1:11434/v1".into(),
-            // Foundation-Sec-8B-Instruct (Cisco) quantifié en Q4_K_M, tiré directement de Hugging Face par Ollama.
-            model: "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M".into(),
+            // Foundation-Sec-8B-Instruct (Cisco) quantifié en IQ4_XS, tiré directement de Hugging Face par
+            // Ollama : ~0,5 Go de moins que Q4_K_M pour une qualité quasi identique. Q4_K_M reste la
+            // référence, à remettre dans `llm.model` si la machine le permet.
+            model: "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:IQ4_XS".into(),
             api_key: String::new(),
             timeout_secs: 300,
+            // Les alertes moyennes sont celles que le triage aide le plus à qualifier. Une machine
+            // modeste peut monter à `High` dans sa configuration pour ménager le CPU.
             min_severity: Severity::Medium,
             language: "français".into(),
             queue_size: 32,
@@ -552,4 +556,39 @@ pub enum ChannelConfig {
         #[serde(default)]
         headers: HashMap<String, String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Modèle par défaut, écrit une seule fois pour les tests ci-dessous.
+    const DEFAULT_MODEL: &str = "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:IQ4_XS";
+
+    // Par défaut : quantification légère IQ4_XS, et les alertes moyennes sont analysées.
+    #[test]
+    fn llm_defaults() {
+        let llm = LlmConfig::default();
+        assert_eq!(llm.model, DEFAULT_MODEL);
+        assert_eq!(llm.min_severity, Severity::Medium);
+    }
+
+    // Les configurations livrées (exemple et Docker) se lisent et reprennent les mêmes valeurs
+    // que le code : sinon, changer de modèle à un seul endroit laisserait les autres en retard.
+    #[test]
+    fn shipped_configs_match_llm_defaults() {
+        for raw in [include_str!("../config.example.toml"), include_str!("../docker/cyward.toml")] {
+            let cfg: Config = toml::from_str(raw).unwrap();
+            assert_eq!(cfg.llm.model, DEFAULT_MODEL);
+            assert_eq!(cfg.llm.min_severity, Severity::Medium);
+        }
+    }
+
+    // La ligne de retour à Q4_K_M est prête en commentaire dans les deux configurations livrées.
+    #[test]
+    fn q4_k_m_fallback_line_is_ready() {
+        let line = "# model = \"hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M\"";
+        assert!(include_str!("../config.example.toml").lines().any(|l| l == line));
+        assert!(include_str!("../docker/cyward.toml").lines().any(|l| l == line));
+    }
 }

@@ -39,7 +39,7 @@ services:
     environment:
       OLLAMA_HOST: ollama:11434
     entrypoint: ["ollama", "pull"]
-    command: ["${CYWARD_MODEL:-hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M}"]
+    command: ["${CYWARD_MODEL:-hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:IQ4_XS}"]
     depends_on:
       ollama:
         condition: service_healthy
