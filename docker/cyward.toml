@@ -16,7 +16,7 @@ whitelist = []
 local_networks = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", "fe80::/10"]
 
 [detection.anomaly]
-# Apprentissage du comportement normal (doc/conception-normalite.md), en mode observation :
+# Apprentissage du comportement normal (docs/conception-normalite.md), en mode observation :
 # les anomalies apparaissent en « info » le temps de calibrer le modèle.
 enabled = true
 mode = "observation"

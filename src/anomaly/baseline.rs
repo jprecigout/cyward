@@ -1,7 +1,7 @@
 //! Cycle de vie du comportement normal (pattern Façade) : échantillons, modèle actif,
 //! modèle candidat, exceptions, versions et journal des décisions.
 //!
-//! Toutes les règles de validation humaine de doc/conception-normalite.md sont ici :
+//! Toutes les règles de validation humaine de docs/conception-normalite.md sont ici :
 //! - une fenêtre signalée n'est jamais apprise tant que l'utilisateur n'a pas répondu ;
 //! - un modèle ne devient actif qu'après validation de son diff, machine par machine
 //!   (sauf si le diff est vide : rien de nouveau n'est alors accepté) ;

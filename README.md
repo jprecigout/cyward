@@ -100,7 +100,7 @@ cyward/
 ├── docker/cyward.toml         # configuration utilisée par l'image Docker
 ├── LICENSE                    # Apache 2.0
 ├── CLAUDE.md                  # règles du projet pour Claude Code
-├── doc/
+├── docs/
 │   └── conception-normalite.md  # conception de l'apprentissage du comportement normal
 ├── .claude/skills/            # skills : verifier, nouveau-detecteur, nouvelle-regle-log, revue
 ├── assets/
@@ -222,7 +222,7 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 - Cache borné (4 096 adresses), absences de nom comprises. Par défaut, seules les adresses internes sont résolues (voir `[names]`).
 
 **`anomaly/`** — Façade ③ (`Baseline`), Repository ⑨ (`Storage`)
-- Apprend le comportement normal de chaque machine interne avec un **Isolation Forest**, et ne fait rien entrer dans ce comportement sans validation humaine. Conception complète : [doc/conception-normalite.md](doc/conception-normalite.md).
+- Apprend le comportement normal de chaque machine interne avec un **Isolation Forest**, et ne fait rien entrer dans ce comportement sans validation humaine. Conception complète : [docs/conception-normalite.md](docs/conception-normalite.md).
 - `detect/anomaly.rs` (une stratégie ① de plus) résume le trafic de chaque machine par fenêtre ; `Baseline` enregistre ces échantillons, les fait juger par le modèle actif, gère le modèle candidat, son diff, les exceptions, les versions et le journal des décisions.
 - Désactivé par défaut (`[detection.anomaly]`), voir la section 3.11.
 
@@ -720,7 +720,7 @@ Pour qu'une règle s'applique aux logs d'une application (nginx, Apache…), ajo
 3. Valider le premier modèle dans le panneau « Comportement normal » du dashboard.
 4. Rester quelques semaines en mode `observation` (anomalies en `info`, sans LLM) avant de passer en mode `alert`.
 
-Conception détaillée, choix et limites : [doc/conception-normalite.md](doc/conception-normalite.md).
+Conception détaillée, choix et limites : [docs/conception-normalite.md](docs/conception-normalite.md).
 
 **MITRE :** couverture transverse, selon le comportement (découverte, exfiltration, C2…).
 

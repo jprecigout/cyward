@@ -7,7 +7,7 @@
 //! comparé à l'actif ([`diff`]) avant d'être validé. [`baseline`] porte ces règles,
 //! [`storage`] les persiste, [`trainer`] déclenche les apprentissages.
 //!
-//! Conception complète : doc/conception-normalite.md.
+//! Conception complète : docs/conception-normalite.md.
 //!
 //! Ce module ne dépend ni de `detect`, ni de `llm`, ni de `web` : le détecteur
 //! (`detect/anomaly.rs`) et l'API (`web.rs`) l'utilisent, pas l'inverse.

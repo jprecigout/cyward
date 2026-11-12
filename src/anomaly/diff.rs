@@ -2,7 +2,7 @@
 //! faire entrer dans le comportement normal, présenté machine par machine.
 //!
 //! Comparer deux forêts directement n'a pas de sens (leurs arbres sont aléatoires) : on
-//! compare ce qu'elles **acceptent**. Trois éclairages (doc/conception-normalite.md, § 4.5) :
+//! compare ce qu'elles **acceptent**. Trois éclairages (docs/conception-normalite.md, § 4.5) :
 //! - diff de décision : fenêtres signalées par l'actif et acceptées par le candidat ;
 //! - diff de profil : caractéristiques dont le 95e centile change de plus de 50 % ;
 //! - dérive cumulée : volumes multipliés ou divisés par plus de `drift_factor` depuis le

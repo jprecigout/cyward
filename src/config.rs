@@ -329,7 +329,7 @@ pub enum AnomalyMode {
 }
 
 /// Section `[detection.anomaly]` : apprentissage du comportement normal par Isolation Forest.
-/// Voir doc/conception-normalite.md.
+/// Voir docs/conception-normalite.md.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AnomalyConfig {

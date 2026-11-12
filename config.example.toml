@@ -77,7 +77,7 @@ window_secs = 300
 failures_threshold = 6
 
 # Apprentissage du comportement normal par Isolation Forest, avec validation humaine.
-# Conception : doc/conception-normalite.md. Pour répondre et valider depuis le dashboard,
+# Conception : docs/conception-normalite.md. Pour répondre et valider depuis le dashboard,
 # web.token doit être défini.
 [detection.anomaly]
 enabled = false

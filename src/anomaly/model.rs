@@ -18,7 +18,7 @@ use crate::config::AnomalyConfig;
 /// En dessous de ce nombre d'échantillons, une machine est comparée au profil global.
 const MIN_HOST_SAMPLES: usize = 20;
 
-/// Statut de validation d'un échantillon (voir doc/conception-normalite.md, § 4.2).
+/// Statut de validation d'un échantillon (voir docs/conception-normalite.md, § 4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SampleStatus {
