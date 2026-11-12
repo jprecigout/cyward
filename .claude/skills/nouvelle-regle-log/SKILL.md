@@ -63,7 +63,7 @@ Dans `src/logs/rules.rs`, sans modifier les règles existantes :
    - un cas positif (la ligne déclenche l'alerte attendue, avec la bonne sévérité) ;
    - un cas négatif (une ligne voisine mais légitime ne déclenche rien ; l'ajouter à `ordinary_lines_are_quiet`) ;
    - pour une règle avec mémoire : sous le seuil → rien, au seuil → une alerte, au-delà → pas d'autre alerte.
-5. **Documentation** : une ligne dans le tableau de la section 3.9 du README (règle, exemple de ligne, alerte).
+5. **Documentation** : une ligne dans le tableau « Règles sur les journaux système » de `docs/detecteurs.md` (règle, exemple de ligne, alerte).
 6. **Vérifier** avec le skill `verifier` : `.claude/skills/verifier/check.sh`.
 
 ## Pièges connus

@@ -45,7 +45,7 @@ impl LogAnalyzer {
     /// Compile les règles intégrées et celles de la configuration ; échoue si une regex
     /// personnalisée est invalide. L'ordre de la liste est celui des alertes produites.
     pub fn new(cfg: AuthConfig, custom: &[CustomLogRule]) -> Result<Self> {
-        // Les exemples de lignes visées sont dans les tests en bas du fichier et dans le README.
+        // Les exemples de lignes visées sont dans les tests en bas du fichier et dans docs/detecteurs.md.
         let mut rules: Vec<Box<dyn LogRule>> = vec![
             Box::new(SshAuth::new(cfg)?),
             Box::new(Sudo::new()?),

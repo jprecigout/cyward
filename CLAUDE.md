@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Projet
 
-Cyward est un agent de détection d'intrusions en Rust (Linux). Il capture le trafic réseau et lit les logs système, lève des alertes via des détecteurs à seuils et statistiques, puis fait trier les alertes importantes par un LLM cyber local (Foundation-Sec-8B-Instruct via Ollama, API compatible OpenAI). Le [README.md](README.md) documente en détail chaque détecteur, la configuration et le déploiement.
+Cyward est un agent de détection d'intrusions en Rust (Linux). Il capture le trafic réseau et lit les logs système, lève des alertes via des détecteurs à seuils et statistiques, puis fait trier les alertes importantes par un LLM cyber local (Foundation-Sec-8B-Instruct via Ollama, API compatible OpenAI). Le [README.md](README.md) présente le projet ; la documentation détaillée (détecteurs, configuration, déploiement…) est dans [docs/](docs/README.md).
 
 Les commentaires, messages de log, textes d'alerte, prompts du LLM et l'interface du dashboard sont **en français** : garder cette langue.
 
@@ -48,12 +48,14 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
 - **Fonctions courtes**, qui font une seule chose et dont le nom le dit ; découper dès qu'une fonction mélange décision et I/O, ou dépasse un écran.
 - **Patterns au service de la simplicité** : un pattern se justifie par un besoin réel (plusieurs implémentations, découplage, testabilité). Pas d'abstraction pour une seule implémentation sans besoin prévisible, pas de couche « au cas où ». Préférer les idiomes Rust (traits, enums + `match`, itérateurs, `?`) aux patterns orientés objet transposés tels quels (pas d'émulation d'héritage, pas d'accesseurs inutiles).
 
-**README toujours à jour (obligatoire)** : la section 2 « Architecture du code » du README est la référence de la structure du projet. Toute modification qui ajoute, change ou retire l'un des éléments suivants met à jour cette section **dans la même modification** :
+**Documentation dans `docs/`, toujours à jour (obligatoire)** : toute la documentation du projet s'écrit dans `docs/`, un fichier par sujet, référencé dans l'index [docs/README.md](docs/README.md). Le README racine reste court : présentation, fonctionnalités, lancement avec Docker, lien vers `docs/`, licence. Une nouvelle documentation va dans `docs/` (fichier existant ou nouveau fichier ajouté à l'index), jamais dans le README ; une fonctionnalité visible pour l'utilisateur s'ajoute aussi en une ligne à la liste « Fonctionnalités » du README. Les renvois entre documents sont des liens Markdown relatifs (`[configuration](configuration.md#notify)`), pas des numéros de section.
+
+[docs/architecture.md](docs/architecture.md) est la référence de la structure du projet. Toute modification qui ajoute, change ou retire l'un des éléments suivants le met à jour **dans la même modification** :
 - un fichier ou un dossier → l'arborescence et « Les composants » ;
 - une dépendance entre modules → le tableau « Dépendances entre modules » (et celui de CLAUDE.md ci-dessus, qui doit rester cohérent avec lui) ;
 - un design pattern, ou un nouvel usage d'un pattern existant → le tableau « Design patterns utilisés » : le pattern, l'endroit du code et le problème qu'il résout dans Cyward.
 
-Le reste du README suit la même règle : détecteurs (section 3), configuration (section 7), API et types d'alerte (section 8), résultat du rejeu (section 11). Une modification dont le README n'est pas à jour n'est pas terminée.
+Le reste de `docs/` suit la même règle : détecteurs ([detecteurs.md](docs/detecteurs.md)), configuration ([configuration.md](docs/configuration.md)), API et types d'alerte ([dashboard-api.md](docs/dashboard-api.md)), commandes ([utilisation.md](docs/utilisation.md)), Docker ([installation.md](docs/installation.md)), résultat du rejeu ([tests.md](docs/tests.md)). Une modification dont la documentation n'est pas à jour n'est pas terminée.
 
 **Diagrammes en Mermaid (obligatoire)** : tout diagramme d'un fichier Markdown (README, `docs/`, CLAUDE.md, skills) s'écrit dans un bloc ` ```mermaid ` (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`…), jamais en art ASCII. Ne sont pas des diagrammes, et restent en texte : les arborescences de fichiers et les exemples de sortie du terminal. Un diagramme ASCII existant qu'on modifie est converti en Mermaid dans la même modification. Les commentaires `//!` du code Rust gardent un schéma texte court, car rustdoc n'affiche pas Mermaid.
 
@@ -68,7 +70,7 @@ Le reste du README suit la même règle : détecteurs (section 3), configuration
 - chaque nouvelle fonctionnalité, détecteur, règle de log ou correction de bug a des tests unitaires dans son module (`#[cfg(test)] mod tests`), avec au moins un cas **positif** (ça détecte) et un cas **négatif** (le trafic ou les logs normaux ne déclenchent rien) ;
 - une correction de bug commence par un test qui reproduit le bug ;
 - avant de considérer le travail fini, lancer `cargo test` (tout doit passer) et `cargo clippy --all-targets` (aucun avertissement) ;
-- toute modification de la détection se vérifie aussi par le rejeu de `examples/gen_attacks.rs` avec `-c examples/rejeu.toml`, qui doit toujours donner 8 alertes. Si un nouveau détecteur est ajouté, ajouter son scénario au générateur et mettre à jour le nombre attendu ici et dans le README ;
+- toute modification de la détection se vérifie aussi par le rejeu de `examples/gen_attacks.rs` avec `-c examples/rejeu.toml`, qui doit toujours donner 8 alertes. Si un nouveau détecteur est ajouté, ajouter son scénario au générateur et mettre à jour le nombre attendu ici et dans `docs/tests.md` ;
 - toute modification du dashboard se vérifie dans un navigateur, après recompilation (la page est embarquée dans le binaire).
 
 ## Commits git : Conventional Commits (obligatoire)
@@ -193,7 +195,7 @@ Points qui demandent de lire plusieurs fichiers pour être compris :
 2. Ajouter sa struct de config dans `config.rs`. Toutes les structs ont `#[serde(default)]` et un `impl Default` qui porte les valeurs par défaut ; reporter la section dans `config.example.toml`.
 3. Ajouter si besoin une variante à `AlertKind`. Elle est sérialisée en snake_case, et le dashboard l'affiche en remplaçant `_` par un espace.
 4. Tester avec `detect::testutil::{syn, dns}` (constructeurs de `PacketMeta`), y compris un cas négatif. Ajouter éventuellement le scénario à `examples/gen_attacks.rs`.
-5. Mettre à jour les tableaux du README (détecteurs, configuration, types d'alerte).
+5. Mettre à jour `docs/detecteurs.md`, `docs/configuration.md` et `docs/dashboard-api.md` (types d'alerte), ainsi que la liste « Fonctionnalités » du README.
 
 Les règles de logs vivent dans `logs/rules.rs` : une struct par règle qui implémente `LogRule` (ou un `Pattern` pour une regex unique sans état), enregistrée dans `LogAnalyzer::new` ; `logs.rs` ne contient que les sources (sous-processus) et le décodage des lignes. Particularité sshd : une même tentative produit `Invalid user …` **et** `Failed password for invalid user …`. Seule la seconde ligne compte comme un échec ; la première sert uniquement à collecter les noms de compte.
 

@@ -61,9 +61,9 @@ Lire chaque fichier modifié **en entier**, ainsi que les appelants des fonction
 - Piège clap : un `///` sur `Cli`/`Command` apparaît dans `--help`.
 
 ### Documentation
-- README section 2 : l'arborescence, les composants, le tableau des dépendances entre modules et celui des design patterns reflètent-ils le code après la modification ? Un nouveau fichier, une nouvelle dépendance ou un nouveau pattern sans mise à jour de cette section est **bloquant** (règle de CLAUDE.md).
-- Le tableau des dépendances de CLAUDE.md est-il cohérent avec celui du README (mêmes modules, mêmes dépendances) ?
-- README (sections 3, 7, 8, 11), `config.example.toml` et CLAUDE.md sont-ils à jour (nouveaux détecteurs, clés de configuration, types d'alerte, nombre d'alertes du rejeu) ?
+- `docs/architecture.md` : l'arborescence, les composants, le tableau des dépendances entre modules et celui des design patterns reflètent-ils le code après la modification ? Un nouveau fichier, une nouvelle dépendance ou un nouveau pattern sans mise à jour de ce document est **bloquant** (règle de CLAUDE.md).
+- Le tableau des dépendances de CLAUDE.md est-il cohérent avec celui de `docs/architecture.md` (mêmes modules, mêmes dépendances) ?
+- `docs/` (`detecteurs.md`, `configuration.md`, `dashboard-api.md`, `tests.md`), la liste « Fonctionnalités » du README, `config.example.toml` et CLAUDE.md sont-ils à jour (nouveaux détecteurs, clés de configuration, types d'alerte, nombre d'alertes du rejeu) ? Une documentation ajoutée au README au lieu de `docs/` est à déplacer.
 
 ## 3. Vérifier, puis rapporter
 

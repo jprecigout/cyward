@@ -40,7 +40,7 @@ Ajoute `--docker` pour construire aussi l'image et y rejouer le pcap :
 | `N alerte(s) au lieu de M` | Un détecteur ne déclenche plus (régression) ou déclenche sur le trafic normal (faux positif). Comparer le bilan affiché avec `EXPECTED_TITLES` |
 | `alerte attendue absente : « … »` | Le titre d'une alerte a changé, ou son détecteur ne déclenche plus |
 
-Si un nouveau scénario est ajouté au générateur, ajouter la sous-chaîne de son titre dans `EXPECTED_TITLES` (et mettre à jour le nombre d'alertes cité dans CLAUDE.md et le README).
+Si un nouveau scénario est ajouté au générateur, ajouter la sous-chaîne de son titre dans `EXPECTED_TITLES` (et mettre à jour le nombre d'alertes cité dans CLAUDE.md et `docs/tests.md`).
 
 ## Limites
 
