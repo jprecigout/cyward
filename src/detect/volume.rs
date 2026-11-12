@@ -8,7 +8,7 @@ use serde_json::json;
 use super::{Detector, ts_to_dt};
 use crate::{
     alert::{Alert, AlertKind, AlertSource, Severity, human_bytes},
-    capture::PacketMeta,
+    capture::{PacketMeta, Proto},
     config::{DetectionConfig, VolumeConfig},
 };
 
@@ -115,8 +115,8 @@ impl Detector for Volume {
     fn on_packet(&mut self, p: &PacketMeta, out: &mut Vec<Alert>) {
         // Clore d'abord la période si ce paquet appartient déjà à la suivante.
         self.roll(p.ts, out);
-        // Seul le trafic interne → externe compte.
-        if self.net.is_local(&p.src) && !self.net.is_local(&p.dst) {
+        // Seul le trafic IP interne → externe compte.
+        if p.proto != Proto::Arp && self.net.is_local(&p.src) && !self.net.is_local(&p.dst) {
             *self.current.entry(p.src).or_default() += p.len as u64;
         }
     }
@@ -130,6 +130,16 @@ impl Detector for Volume {
 mod tests {
     use super::*;
     use crate::detect::testutil::syn;
+
+    // Les trames ARP ne sont pas du trafic sortant, même si l'IP visée paraît externe.
+    #[test]
+    fn arp_frames_are_not_counted() {
+        let mut d = Volume::new(VolumeConfig::default(), DetectionConfig::default());
+        let mut out = Vec::new();
+        let arp = PacketMeta { proto: Proto::Arp, len: 1_000_000, ..syn(1.0, "192.168.1.30", "203.0.113.5", 0) };
+        d.on_packet(&arp, &mut out);
+        assert!(d.current.is_empty());
+    }
 
     #[test]
     fn detects_exfiltration_spike() {

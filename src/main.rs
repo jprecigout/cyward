@@ -252,8 +252,10 @@ async fn run(cfg: Config, baseline: Option<Arc<Baseline>>) -> Result<()> {
         // Canal borné entre le thread de capture et le moteur : s'il est plein, la capture
         // abandonne des paquets plutôt que de bloquer (voir capture::spawn_live).
         let (tx, rx) = mpsc::channel(cfg.capture.queue_size);
+        // Moteur créé avant la capture : une liste de menaces illisible arrête tout de suite le démarrage.
+        let engine = Engine::new(&cfg.detection, baseline.clone())?;
         capture::spawn_live(iface, cfg.capture.promiscuous, tx, stats.clone())?;
-        tokio::spawn(run_engine(Engine::new(&cfg.detection, baseline.clone()), rx, sink.clone(), true));
+        tokio::spawn(run_engine(engine, rx, sink.clone(), true));
     }
 
     if cfg.logs.enabled {
@@ -312,7 +314,7 @@ async fn replay(mut cfg: Config, file: PathBuf, serve: bool) -> Result<()> {
 
     let (tx, rx) = mpsc::channel(4096);
     // `live = false` : pas de tick sur l'horloge murale, seul le temps du pcap compte.
-    let engine = tokio::spawn(run_engine(Engine::new(&cfg.detection, baseline.clone()), rx, sink.clone(), false));
+    let engine = tokio::spawn(run_engine(Engine::new(&cfg.detection, baseline.clone())?, rx, sink.clone(), false));
     capture::replay(&file, tx, stats.clone()).await?;
     // `replay` a rendu l'émetteur du canal : le moteur termine dès qu'il a vidé la file.
     engine.await?;

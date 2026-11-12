@@ -5,7 +5,11 @@
 //! ce qui permet un fichier minimal (ou pas de fichier du tout). Les valeurs par défaut
 //! sont reproduites et commentées dans `config.example.toml`.
 
-use std::{collections::HashMap, net::IpAddr, path::Path};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use ipnet::IpNet;
@@ -94,6 +98,8 @@ pub struct DetectionConfig {
     pub beacon: BeaconConfig,
     pub volume: VolumeConfig,
     pub dns: DnsConfig,
+    pub threat_list: ThreatListConfig,
+    pub arp: ArpConfig,
     pub auth: AuthConfig,
     /// Règles regex supplémentaires appliquées aux logs (`[[detection.custom_log_rules]]`).
     pub custom_log_rules: Vec<CustomLogRule>,
@@ -118,6 +124,8 @@ impl Default for DetectionConfig {
             beacon: Default::default(),
             volume: Default::default(),
             dns: Default::default(),
+            threat_list: Default::default(),
+            arp: Default::default(),
             auth: Default::default(),
             custom_log_rules: Vec::new(),
             anomaly: Default::default(),
@@ -257,6 +265,40 @@ impl Default for DnsConfig {
             unique_subdomains_threshold: 150,
             ignore_suffixes: vec!["in-addr.arpa".into(), "ip6.arpa".into(), "local".into()],
         }
+    }
+}
+
+/// Section `[detection.threat_list]` : trafic avec des IP de listes de menaces (abuse.ch, Spamhaus…).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ThreatListConfig {
+    /// Fichiers de listes, lus au démarrage (une IP ou un réseau CIDR par ligne, commentaires
+    /// `#` et `;`, ou JSON lignes avec un champ `cidr`). Vide = détecteur désactivé.
+    pub lists: Vec<PathBuf>,
+    /// Délai avant de signaler à nouveau un même couple (hôte interne, IP listée), en secondes.
+    pub realert_secs: f64,
+}
+
+impl Default for ThreatListConfig {
+    fn default() -> Self {
+        Self { lists: Vec::new(), realert_secs: 3600.0 }
+    }
+}
+
+/// Section `[detection.arp]` : usurpation ARP (empoisonnement de cache, homme du milieu).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ArpConfig {
+    /// Durée pendant laquelle une MAC reste « active » pour une IP, en secondes. Une seconde
+    /// MAC annoncée pour la même IP dans ce délai est un conflit ; au-delà, un simple remplacement.
+    pub window_secs: f64,
+    /// IP sensibles (passerelle, DNS, serveurs) : un conflit sur l'une d'elles est de sévérité haute.
+    pub protected_ips: Vec<IpAddr>,
+}
+
+impl Default for ArpConfig {
+    fn default() -> Self {
+        Self { window_secs: 3600.0, protected_ips: Vec::new() }
     }
 }
 

@@ -67,7 +67,7 @@ Le reste du README suit la même règle : détecteurs (section 3), configuration
 - chaque nouvelle fonctionnalité, détecteur, règle de log ou correction de bug a des tests unitaires dans son module (`#[cfg(test)] mod tests`), avec au moins un cas **positif** (ça détecte) et un cas **négatif** (le trafic ou les logs normaux ne déclenchent rien) ;
 - une correction de bug commence par un test qui reproduit le bug ;
 - avant de considérer le travail fini, lancer `cargo test` (tout doit passer) et `cargo clippy --all-targets` (aucun avertissement) ;
-- toute modification de la détection se vérifie aussi par le rejeu de `examples/gen_attacks.rs`, qui doit toujours donner 6 alertes. Si un nouveau détecteur est ajouté, ajouter son scénario au générateur et mettre à jour le nombre attendu ici et dans le README ;
+- toute modification de la détection se vérifie aussi par le rejeu de `examples/gen_attacks.rs` avec `-c examples/rejeu.toml`, qui doit toujours donner 8 alertes. Si un nouveau détecteur est ajouté, ajouter son scénario au générateur et mettre à jour le nombre attendu ici et dans le README ;
 - toute modification du dashboard se vérifie dans un navigateur, après recompilation (la page est embarquée dans le binaire).
 
 ## Commits git : Conventional Commits (obligatoire)
@@ -111,12 +111,12 @@ cargo test detects_ssh_bruteforce   # un seul test (filtre sur le nom)
 cargo clippy --all-targets       # doit rester sans avertissement
 ```
 
-Test de bout en bout sans réseau ni droits : générer un pcap d'attaques simulées puis le rejouer. Le rejeu doit produire 6 alertes (balise C2 ×12, force brute, scan, balayage, tunnel DNS, volume) :
+Test de bout en bout sans réseau ni droits : générer un pcap d'attaques simulées puis le rejouer. Avec `examples/rejeu.toml` (liste de menaces d'exemple, passerelle protégée), le rejeu doit produire 8 alertes (balise C2 ×12, force brute, scan, balayage, tunnel DNS, IP listée, usurpation ARP, volume) ; sans, 7 (pas de liste de menaces) :
 
 ```bash
 cargo run --example gen_attacks -- /tmp/attaques.pcap
-cargo run -- replay /tmp/attaques.pcap            # affiche les alertes et quitte
-cargo run -- replay /tmp/attaques.pcap --serve    # garde dashboard + triage LLM actifs
+cargo run -- -c examples/rejeu.toml replay /tmp/attaques.pcap            # affiche les alertes et quitte
+cargo run -- -c examples/rejeu.toml replay /tmp/attaques.pcap --serve    # garde dashboard + triage LLM actifs
 ```
 
 Docker (Linux) : `docker compose build cyward` puis `docker compose run --rm --no-deps cyward`. Cette commande lance l'agent sans Ollama et sans télécharger le modèle de 5 Go. Le service tourne en `network_mode: host`, avec uniquement `NET_RAW`/`NET_ADMIN` et le journal de l'hôte monté, donc la capture live fonctionne sans `setcap`. La config du conteneur est `docker/cyward.toml`, distincte de `config.example.toml`. Si une dépendance est ajoutée, la couche de cache du `Dockerfile` (faux `main.rs`) suffit ; si un nouveau dossier est embarqué via `include_str!`, il faut ajouter son `COPY`.
@@ -171,7 +171,7 @@ Points qui demandent de lire plusieurs fichiers pour être compris :
   - Tant que le serveur est hors ligne, les alertes restent `Pending` ; elles ne sont pas marquées en échec.
   - Le prompt inclut jusqu'à 8 alertes récentes impliquant les mêmes hôtes, comparées sans le port grâce à `host_part`.
   - `parse_analysis` est volontairement tolérant : il extrait le JSON entouré de texte, accepte une confiance en `"85%"` et un champ `mitre` en chaîne simple.
-- **Mémoire bornée.** Tout l'état des détecteurs est en `HashMap` purgées dans `tick`, avec des plafonds (`MAX_TRACKED` dans beacon, `MAX_SCAN_ENTRIES` et `MAX_BRUTEFORCE_COUNTERS` dans scan, 10 000 sources dans synflood, purge des échecs dans logs). Un plafond se rend testable par un champ (`max_entries`, `max_counters`) initialisé à la constante et réduit dans les tests. L'`AlertStore` garde 5 000 alertes. Tout nouvel état doit avoir sa purge.
+- **Mémoire bornée.** Tout l'état des détecteurs est en `HashMap` purgées dans `tick`, avec des plafonds (`MAX_TRACKED` dans beacon et arp, `MAX_SEEN` dans threat, `MAX_SCAN_ENTRIES` et `MAX_BRUTEFORCE_COUNTERS` dans scan, 10 000 sources dans synflood, purge des échecs dans logs). Un plafond se rend testable par un champ (`max_entries`, `max_counters`) initialisé à la constante et réduit dans les tests. L'`AlertStore` garde 5 000 alertes. Tout nouvel état doit avoir sa purge.
 - **Historique des alertes** (`src/history.rs`, désactivé tant que `history.path` est vide). Il recharge le store au démarrage (`AlertStore::restore`) puis écrit par lots depuis un thread dédié : ne jamais écrire en base depuis `emit` ni sous le verrou du store. La taille est bornée par âge et par nombre, avec une purge anticipée après `max_alerts / 10` alertes nouvelles (inondation). Le rejeu n'y écrit jamais.
 - **Interne / externe.** `DetectionConfig::is_local` (basé sur `local_networks`) détermine :
   - la sévérité des scans (source interne = mouvement latéral = High) ;
@@ -180,6 +180,8 @@ Points qui demandent de lire plusieurs fichiers pour être compris :
 - **Capture.**
   - `pnet_datalink` (AF_PACKET, pur Rust) pour le live ; `pcap-file` v2 pour le rejeu. Le rejeu gère Ethernet, Linux SLL et IP brut, mais pas pcapng.
   - Le parsing passe par `etherparse::SlicedPacket` ; la question DNS est décodée à la main dans `parse_dns_query`.
+  - Les trames ARP donnent un `PacketMeta` avec `proto = Proto::Arp` (src/dst = IP de l'émetteur et IP visée) et `arp: Some(ArpInfo)`. Un détecteur qui compte du trafic IP doit les écarter (`volume`, `anomaly` le font).
+  - Les listes de menaces sont la seule lecture de fichier de `detect/` : `threat::Blocklist::load`, appelée une fois par `Engine::new` (qui renvoie donc un `Result`).
   - La capture fait `try_send` et compte les pertes dans `Stats.dropped` plutôt que de bloquer.
   - Sans `capture.interface`, `pick_interface` prend l'interface de la route par défaut (`/proc/net/route`).
 

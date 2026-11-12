@@ -1,0 +1,10 @@
+# Configuration du rejeu de examples/gen_attacks.rs (chemins relatifs à la racine du dépôt) :
+#   cargo run -- -c examples/rejeu.toml replay /tmp/attaques.pcap
+# Les valeurs non précisées sont celles par défaut.
+
+[detection.threat_list]
+lists = ["examples/menaces.txt"]
+
+[detection.arp]
+# La passerelle du scénario : son usurpation est de sévérité haute.
+protected_ips = ["192.168.1.1"]

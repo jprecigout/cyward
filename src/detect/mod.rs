@@ -7,13 +7,16 @@
 //! à la liste dans [`Engine::new`].
 
 mod anomaly;
+mod arp;
 mod beacon;
 mod dns;
 mod scan;
+mod threat;
 mod volume;
 
 use std::{collections::HashSet, net::IpAddr, sync::Arc};
 
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 
 use crate::{alert::Alert, anomaly::baseline::Baseline, capture::PacketMeta, config::DetectionConfig};
@@ -39,7 +42,8 @@ pub struct Engine {
 
 impl Engine {
     /// `baseline` : apprentissage du comportement normal, si activé (`detection.anomaly`).
-    pub fn new(cfg: &DetectionConfig, baseline: Option<Arc<Baseline>>) -> Self {
+    /// Échoue si une liste de menaces (`detection.threat_list.lists`) est illisible.
+    pub fn new(cfg: &DetectionConfig, baseline: Option<Arc<Baseline>>) -> Result<Self> {
         // Certains détecteurs reçoivent toute la DetectionConfig pour accéder à `is_local`.
         let mut detectors: Vec<Box<dyn Detector>> = vec![
             Box::new(scan::PortScan::new(cfg.portscan.clone(), cfg.clone())),
@@ -48,11 +52,19 @@ impl Engine {
             Box::new(beacon::Beaconing::new(cfg.beacon.clone(), cfg.clone())),
             Box::new(volume::Volume::new(cfg.volume.clone(), cfg.clone())),
             Box::new(dns::Dns::new(cfg.dns.clone())),
+            Box::new(arp::ArpSpoofing::new(cfg.arp.clone())),
         ];
+        // Sans liste configurée, le détecteur n'aurait rien à chercher : il n'est pas créé.
+        if !cfg.threat_list.lists.is_empty() {
+            let list = threat::Blocklist::load(&cfg.threat_list.lists)?;
+            if !list.is_empty() {
+                detectors.push(Box::new(threat::ThreatList::new(cfg.threat_list.clone(), cfg.clone(), list)));
+            }
+        }
         if let Some(b) = baseline {
             detectors.push(Box::new(anomaly::HostAnomaly::new(b, cfg.clone())));
         }
-        Self { detectors, whitelist: cfg.whitelist.iter().copied().collect(), last_tick: 0.0 }
+        Ok(Self { detectors, whitelist: cfg.whitelist.iter().copied().collect(), last_tick: 0.0 })
     }
 
     /// Fait passer un paquet dans tous les détecteurs et renvoie les alertes produites.
@@ -108,6 +120,7 @@ pub(crate) mod testutil {
             len: 60,
             tcp: TcpFlags { syn: true, ..Default::default() },
             dns_query: None,
+            arp: None,
         }
     }
 

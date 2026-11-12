@@ -51,6 +51,10 @@ pub enum AlertKind {
     DnsTunneling,
     /// Nom DNS très long ou à forte entropie.
     SuspiciousDns,
+    /// Trafic avec une IP présente dans une liste de menaces.
+    ThreatListMatch,
+    /// Deux adresses MAC annoncées en même temps pour une même IP (usurpation ARP).
+    ArpSpoofing,
     // --- Règles de logs ---
     /// Échecs d'authentification répétés.
     AuthBruteForce,

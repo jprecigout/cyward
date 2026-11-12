@@ -47,7 +47,7 @@ flowchart TB
         direction TB
         CAP["Capture AF_PACKET<br/>thread dédié"]
         PAR["Parsing etherparse<br/>→ métadonnées du paquet"]
-        DET["Détecteurs réseau<br/>scan, force brute, C2, DNS, volume…<br/>et écarts au comportement appris"]
+        DET["Détecteurs réseau<br/>scan, force brute, C2, DNS, volume, ARP, listes de menaces…<br/>et écarts au comportement appris"]
         LEC["Lecture continue<br/>journalctl -f, tail -F"]
         REG["Règles de logs<br/>SSH, sudo, comptes…"]
     end
@@ -76,7 +76,7 @@ flowchart TB
 
 Le système fonctionne en deux étages.
 
-**Étage 1 : détection rapide, en Rust.** Chaque paquet est réduit à ses métadonnées : adresses, ports, drapeaux TCP, taille et nom DNS demandé. Le contenu n'est jamais conservé. Des détecteurs statistiques et à seuils traitent ces métadonnées au fil de l'eau. En parallèle, les journaux système sont lus en continu et comparés à des règles. Cet étage traite des dizaines de milliers de paquets par seconde sur un CPU ordinaire.
+**Étage 1 : détection rapide, en Rust.** Chaque paquet est réduit à ses métadonnées : adresses, ports, drapeaux TCP, taille, nom DNS demandé et, pour l'ARP, l'adresse MAC annoncée. Le contenu n'est jamais conservé. Des détecteurs statistiques et à seuils traitent ces métadonnées au fil de l'eau. En parallèle, les journaux système sont lus en continu et comparés à des règles. Cet étage traite des dizaines de milliers de paquets par seconde sur un CPU ordinaire.
 
 **Étage 2 : analyse par un modèle de langage.** Les alertes dont la sévérité dépasse un seuil, `medium` par défaut, sont envoyées une par une au modèle. Il reçoit l'alerte, ses preuves et les autres alertes récentes impliquant les mêmes adresses. Il renvoie :
 
@@ -107,7 +107,9 @@ cyward/
 │   ├── index.html             # dashboard (embarqué dans le binaire à la compilation)
 │   └── logo.svg, logo-wordmark.svg, favicon.svg
 ├── examples/
-│   └── gen_attacks.rs         # générateur de pcap d'attaques simulées
+│   ├── gen_attacks.rs         # générateur de pcap d'attaques simulées
+│   ├── rejeu.toml             # configuration du rejeu (liste de menaces, passerelle)
+│   └── menaces.txt            # liste de menaces d'exemple (adresses de documentation)
 └── src/
     ├── main.rs                # CLI, assemblage des tâches, boucle du moteur   ⑤ ⑧
     ├── banner.rs              # bannière de démarrage (logo, version, résumé de la config)
@@ -121,6 +123,8 @@ cyward/
     │   ├── beacon.rs          # balises périodiques (C2)                       ①
     │   ├── volume.rs          # volume sortant anormal (exfiltration)          ①
     │   ├── dns.rs             # DNS à forte entropie, tunnel DNS               ①
+    │   ├── threat.rs          # trafic avec des IP de listes de menaces        ①
+    │   ├── arp.rs             # usurpation ARP (homme du milieu)               ①
     │   └── anomaly.rs         # écarts au comportement normal appris           ①
     ├── anomaly/               # apprentissage du comportement normal
     │   ├── features.rs        # 12 caractéristiques par machine et par fenêtre
@@ -158,10 +162,10 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 **`capture.rs`** — producteur du pipeline ⑤
 - **Capture live** : utilise `pnet_datalink`, qui ouvre une socket `AF_PACKET`. Cette crate est en pur Rust, sans dépendance à libpcap. La lecture tourne dans un thread dédié et envoie des `PacketMeta` au moteur par un canal borné (`capture.queue_size`). Si le moteur ne suit pas, les paquets sont abandonnés plutôt que de bloquer la capture, et le compteur « Perdus » augmente.
 - **Rejeu** : lit un fichier pcap classique avec `pcap-file`. Les types de lien gérés sont Ethernet, Linux SLL (`tcpdump -i any`) et IP brut.
-- **Parsing** : assuré par `etherparse` ; la question DNS est extraite à la main.
+- **Parsing** : assuré par `etherparse` ; la question DNS est extraite à la main. Les trames ARP (IPv4 sur Ethernet) donnent aussi un `PacketMeta` (`proto = Arp`), avec l'IP et la MAC annoncées dans `arp`, pour le détecteur d'usurpation ARP ; les autres détecteurs les ignorent.
 
 **`detect/`** — Strategy ①
-- Sept stratégies : six détecteurs à règles, plus `HostAnomaly` qui alimente l'apprentissage du comportement normal (s'il est activé).
+- Neuf stratégies : huit détecteurs à règles, plus `HostAnomaly` qui alimente l'apprentissage du comportement normal (s'il est activé). `ThreatList` n'est créé que si une liste de menaces est configurée.
 - Chaque détecteur implémente :
   ```rust
   trait Detector {
@@ -213,7 +217,7 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 **`anomaly/`** — Façade ③ (`Baseline`), Repository ⑨ (`Storage`)
 - Apprend le comportement normal de chaque machine interne avec un **Isolation Forest**, et ne fait rien entrer dans ce comportement sans validation humaine. Conception complète : [doc/conception-normalite.md](doc/conception-normalite.md).
 - `detect/anomaly.rs` (une stratégie ① de plus) résume le trafic de chaque machine par fenêtre ; `Baseline` enregistre ces échantillons, les fait juger par le modèle actif, gère le modèle candidat, son diff, les exceptions, les versions et le journal des décisions.
-- Désactivé par défaut (`[detection.anomaly]`), voir la section 3.9.
+- Désactivé par défaut (`[detection.anomaly]`), voir la section 3.11.
 
 **`banner.rs`**
 - Construit la bannière affichée au démarrage. La fonction de rendu est pure (elle renvoie une chaîne) ; seul `main.rs` l'affiche, avec ou sans couleurs selon le terminal.
@@ -236,7 +240,7 @@ Les dépendances vont dans un seul sens : les **producteurs** d'alertes (`detect
 
 `main.rs` est la **racine de composition** : c'est le seul endroit qui crée les composants et les relie entre eux (canaux, `Arc` partagés). Changer de serveur LLM, ou désactiver le triage IA, ne demande donc aucune modification des détecteurs.
 
-Autre principe de découpage : **la logique de décision ne fait pas d'entrées/sorties**. `parse_packet`, `parse_dns_query`, les détecteurs, `LogAnalyzer::analyze`, `parse_analysis`, `banner::render`, la lecture des réponses DNS de `names.rs`, les caractéristiques, l'Isolation Forest et le diff de `anomaly/`, ainsi que le regroupement et la rétention de `history.rs`, ne touchent ni au réseau, ni aux fichiers, ni au LLM. Ils se testent avec de simples valeurs en mémoire, et les I/O restent en bordure (sockets, sous-processus, HTTP).
+Autre principe de découpage : **la logique de décision ne fait pas d'entrées/sorties**. `parse_packet`, `parse_dns_query`, les détecteurs (seul `Blocklist::load` lit les listes de menaces, une fois, à la création du moteur), `LogAnalyzer::analyze`, `parse_analysis`, `banner::render`, la lecture des réponses DNS de `names.rs`, les caractéristiques, l'Isolation Forest et le diff de `anomaly/`, ainsi que le regroupement et la rétention de `history.rs`, ne touchent ni au réseau, ni aux fichiers, ni au LLM. Ils se testent avec de simples valeurs en mémoire, et les I/O restent en bordure (sockets, sous-processus, HTTP).
 
 ### Design patterns utilisés
 
@@ -592,7 +596,57 @@ Chaque seuil cité est modifiable dans la configuration (section 7).
 
 **MITRE :** T1071.004 (DNS), T1568.002 (Domain Generation Algorithms), T1048 (Exfiltration Over Alternative Protocol).
 
-### 3.7 Règles sur les journaux système (`LogAnalyzer`, `src/logs/rules.rs`)
+### 3.7 Listes de menaces (`ThreatList`)
+
+**Ce qu'il repère :** le trafic avec des adresses connues pour être malveillantes. Des projets publics recensent les serveurs de commande (C2) de botnets actifs et les réseaux détournés par des criminels. Un poste qui contacte l'un d'eux est très probablement infecté, même si sa balise est trop irrégulière pour le détecteur `Beaconing`.
+
+**Fonctionnement :**
+- Les fichiers de `threat_list.lists` sont lus **au démarrage**. Sans liste, le détecteur n'est pas créé ; une liste illisible empêche le démarrage.
+- Formats reconnus : une IP ou un réseau CIDR en début de ligne (commentaires `#` et `;`, colonnes en plus ignorées), ou un objet JSON par ligne avec un champ `cidr` ou `ip`. Cela couvre notamment :
+
+  | Liste | URL | Contenu |
+  |---|---|---|
+  | abuse.ch Feodo Tracker | `https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt` | Serveurs C2 de botnets actifs (Emotet, QakBot, Dridex…) |
+  | Spamhaus DROP | `https://www.spamhaus.org/drop/drop_v4.json` (et `drop_v6.json`) | Réseaux entiers détournés ou exploités par des criminels |
+  | FireHOL level1 | `https://iplists.firehol.org/files/firehol_level1.netset` | Agrégat de plusieurs listes, peu de faux positifs |
+- Seul le trafic qui **franchit la frontière** du réseau interne est vérifié (`local_networks`). La recherche est faite sur chaque paquet. Les réseaux sont rangés par longueur de préfixe : une adresse se vérifie en une recherche par longueur présente (une trentaine au plus), quelle que soit la taille des listes.
+- Une alerte par couple (hôte interne, IP listée), puis plus rien pour ce couple pendant `realert_secs` (1 h). La mémoire est bornée à 10 000 couples ; au-delà, les alertes restent émises et fusionnées par le store.
+
+**Sévérité :**
+- **Haute** pour un hôte interne qui contacte une IP listée (`Connexion vers une IP listée`).
+- **Basse** pour une IP listée qui contacte un hôte interne (`Trafic entrant d'une IP listée`) : c'est le plus souvent un scanner. L'alerte n'est pas envoyée au LLM par défaut, mais elle figure dans le contexte des autres alertes visant cet hôte.
+
+**Mise à jour des listes :** Cyward ne télécharge rien lui-même. Un timer systemd ou une tâche cron télécharge les listes, puis redémarre l'agent :
+
+```bash
+curl -fsS -o /etc/cyward/feodo.txt https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt && systemctl restart cyward
+```
+
+**Faux positifs fréquents :** un réseau Spamhaus DROP peut contenir, rarement, une adresse réattribuée depuis. Les listes de C2 contiennent parfois des hébergeurs partagés.
+
+**MITRE :** T1071 (Application Layer Protocol), T1105 (Ingress Tool Transfer), T1595 (Active Scanning) pour le trafic entrant.
+
+### 3.8 Usurpation ARP (`ArpSpoofing`)
+
+**Ce qu'il repère :** l'**empoisonnement de cache ARP**. Sur un réseau local, l'ARP associe chaque IP à une adresse MAC sans aucune authentification. Une machine qui annonce « l'IP de la passerelle, c'est moi » reçoit le trafic des autres, qu'elle peut lire ou modifier avant de le relayer (homme du milieu, outils `arpspoof`, `ettercap`, `bettercap`).
+
+**Fonctionnement :**
+- Le détecteur lit les requêtes et réponses ARP (IPv4 sur Ethernet), et retient pour chaque IP les adresses MAC qui l'ont annoncée, avec la date de leur dernière annonce.
+- L'attaquant doit répéter ses annonces, car la vraie machine continue de répondre. Quand **une seconde MAC** annonce la même IP alors que la première s'est annoncée il y a moins de `window_secs` (1 h), l'alerte est levée, une seule fois par conflit.
+- Une MAC silencieuse depuis `window_secs` est oubliée : une nouvelle MAC après ce délai est un remplacement ordinaire (carte changée, IP réattribuée par DHCP).
+- Les sondes de détection de doublon (émetteur `0.0.0.0`, RFC 5227) sont ignorées.
+- **Mémoire bornée** : 10 000 IP suivies et 4 MAC par IP au plus, purgées après `window_secs` de silence.
+- Il faut voir le trafic ARP du réseau : l'agent doit être sur le même segment que les machines surveillées (les annonces ARP sont diffusées à tout le segment, un port miroir n'est pas nécessaire).
+
+**Sévérité :**
+- **Haute** si l'IP fait partie de `protected_ips` (mets-y la passerelle, le DNS et les serveurs importants).
+- **Moyenne** sinon.
+
+**Faux positifs fréquents :** deux machines configurées avec la même IP, basculement entre deux cartes réseau (bonding actif-passif), machines virtuelles migrées. Les preuves de l'alerte donnent les deux MAC, que l'on retrouve dans la table du commutateur ou dans `ip neigh`.
+
+**MITRE :** T1557.002 (Adversary-in-the-Middle: ARP Cache Poisoning).
+
+### 3.9 Règles sur les journaux système (`LogAnalyzer`, `src/logs/rules.rs`)
 
 | Règle | Exemple de ligne | Alerte |
 |---|---|---|
@@ -620,7 +674,7 @@ title = "Tentative de connexion WordPress"
 
 Pour qu'une règle s'applique aux logs d'une application (nginx, Apache…), ajoute son fichier dans `logs.files`.
 
-### 3.8 Sévérités
+### 3.10 Sévérités
 
 | Niveau | Sens | Envoyé au LLM par défaut |
 |---|---|---|
@@ -630,7 +684,7 @@ Pour qu'une règle s'applique aux logs d'une application (nginx, Apache…), ajo
 | `low` | Signal faible, utile en corrélation | non |
 | `info` | Information | non |
 
-### 3.9 Apprentissage du comportement normal (`HostAnomaly`)
+### 3.11 Apprentissage du comportement normal (`HostAnomaly`)
 
 **Ce qu'il repère :** ce qui sort de l'habitude d'une machine, sans règle écrite à l'avance. Par exemple, une combinaison dont chaque mesure, prise seule, resterait sous les seuils : 40 destinations inconnues, la nuit, sur des ports inhabituels.
 
@@ -967,6 +1021,20 @@ Toutes les clés sont optionnelles. [`config.example.toml`](config.example.toml)
 | `unique_subdomains_threshold` | `150` | Sous-domaines uniques d'un même domaine |
 | `ignore_suffixes` | `["in-addr.arpa", "ip6.arpa", "local"]` | Suffixes ignorés |
 
+### `[detection.threat_list]`
+
+| Clé | Défaut | Description |
+|---|---|---|
+| `lists` | `[]` | Fichiers de listes de menaces, lus au démarrage (formats : section 3.7). Vide = détecteur désactivé |
+| `realert_secs` | `3600` | Délai avant de signaler à nouveau un même couple (hôte interne, IP listée) |
+
+### `[detection.arp]`
+
+| Clé | Défaut | Description |
+|---|---|---|
+| `window_secs` | `3600` | Durée pendant laquelle une MAC reste active pour une IP : une seconde MAC dans ce délai est un conflit |
+| `protected_ips` | `[]` | IP sensibles (passerelle, DNS…) dont l'usurpation est de sévérité haute, ex. `["192.168.1.1"]` |
+
 ### `[detection.auth]`
 
 | Clé | Défaut | Description |
@@ -976,11 +1044,11 @@ Toutes les clés sont optionnelles. [`config.example.toml`](config.example.toml)
 
 ### `[[detection.custom_log_rules]]`
 
-Champs : `name`, `pattern` (regex Rust), `severity` (`info` à `critical`), `title`. Voir la section 3.7.
+Champs : `name`, `pattern` (regex Rust), `severity` (`info` à `critical`), `title`. Voir la section 3.9.
 
 ### `[detection.anomaly]`
 
-Apprentissage du comportement normal (section 3.9).
+Apprentissage du comportement normal (section 3.11).
 
 | Clé | Défaut | Description |
 |---|---|---|
@@ -1169,7 +1237,7 @@ Format d'une alerte :
 
 | Réseau | Logs | Apprentissage du comportement normal |
 |---|---|---|
-| `port_scan`, `host_sweep`, `brute_force`, `syn_flood`, `beaconing`, `volume_anomaly`, `dns_tunneling`, `suspicious_dns` | `auth_brute_force`, `auth_compromise`, `privilege_escalation`, `account_change`, `custom_rule` | `host_anomaly`, `baseline_drift`, `baseline_rejected` |
+| `port_scan`, `host_sweep`, `brute_force`, `syn_flood`, `beaconing`, `volume_anomaly`, `dns_tunneling`, `suspicious_dns`, `threat_list_match`, `arp_spoofing` | `auth_brute_force`, `auth_compromise`, `privilege_escalation`, `account_change`, `custom_rule` | `host_anomaly`, `baseline_drift`, `baseline_rejected` |
 
 `syn_flood` peut aussi venir des logs, quand c'est le noyau qui le signale.
 
@@ -1265,8 +1333,8 @@ Avec `AmbientCapabilities`, le `setcap` sur le binaire n'est pas nécessaire.
 cargo test
 ```
 
-85 tests couvrent :
-- le parsing des paquets et du DNS ;
+149 tests couvrent :
+- le parsing des paquets, du DNS et de l'ARP, et des formats de listes de menaces ;
 - chaque détecteur, cas positifs et négatifs (un scan lent ou un trafic irrégulier ne doivent pas déclencher), et le plafond mémoire des détecteurs exposés aux adresses usurpées ;
 - les règles de logs, cas positifs et négatifs (lignes ordinaires, regex personnalisée invalide), et le décodage des lignes journald et texte ;
 - la fusion des alertes ;
@@ -1283,26 +1351,34 @@ Le programme d'exemple génère un pcap de 40 minutes. Il contient le trafic nor
 3. scan de 200 ports du serveur par le poste compromis ;
 4. balayage du port 445 sur 40 machines ;
 5. exfiltration par tunnel DNS (300 sous-domaines encodés) ;
-6. envoi de ~85 Mo en une minute vers le serveur C2.
+6. envoi de ~85 Mo en une minute vers le serveur C2 ;
+7. connexion vers `192.0.2.200`, serveur C2 présent dans la liste de menaces d'exemple ;
+8. usurpation ARP de la passerelle `192.168.1.1` par le poste compromis.
+
+Le pcap contient aussi les annonces ARP ordinaires de la passerelle et du portable, qui ne doivent rien déclencher. La configuration [`examples/rejeu.toml`](examples/rejeu.toml) charge la liste [`examples/menaces.txt`](examples/menaces.txt) et protège la passerelle ; les chemins sont relatifs à la racine du dépôt.
 
 ```bash
 cargo run --example gen_attacks -- attaques.pcap
 ```
 ```bash
-cargo run -- replay attaques.pcap
+cargo run -- -c examples/rejeu.toml replay attaques.pcap
 ```
 
 Résultat attendu (les heures sont celles du pcap, en UTC) :
 
 ```
-61660 paquets, 88663669 octets analysés, 6 alerte(s)
+61773 paquets, 88668451 octets analysés, 8 alerte(s)
 [  Medium] 2026-11-11 10:09:41 Balise périodique de 192.168.1.20 vers 198.51.100.66:8443  (x12)
 [    High] 2026-11-11 10:10:22 Force brute probable sur 192.168.1.10:22 depuis 203.0.113.77  (x1)
 [    High] 2026-11-11 10:15:01 Scan de ports de 192.168.1.20 vers 192.168.1.10  (x1)
 [    High] 2026-11-11 10:16:02 Balayage du port 445 par 192.168.1.20  (x1)
 [    High] 2026-11-11 10:21:14 Tunnel DNS probable de 192.168.1.20 via tunnel-exfil.net  (x1)
+[    High] 2026-11-11 10:23:20 Connexion vers une IP listée : 192.0.2.200  (x1)
+[    High] 2026-11-11 10:25:00 Usurpation ARP de 192.168.1.1 (IP protégée)  (x1)
 [    High] 2026-11-11 10:31:00 Volume sortant anormal depuis 192.168.1.20  (x1)
 ```
+
+Sans `-c examples/rejeu.toml`, le rejeu donne 7 alertes : pas de liste de menaces, et l'usurpation ARP est de sévérité moyenne.
 
 Pour voir l'analyse de l'IA, ajoute `--serve` et ouvre le dashboard. Comme toutes ces alertes concernent `192.168.1.20`, le modèle reçoit les autres en contexte et peut reconstituer la chaîne d'attaque.
 
@@ -1313,6 +1389,7 @@ Ne le fais que sur **ton propre réseau ou un réseau où tu es autorisé**.
 - **Scan :** depuis une autre machine, lance `nmap -sS <ip>`.
 - **Force brute SSH :** échoue volontairement plusieurs fois à te connecter en SSH.
 - **sudo refusé :** avec un compte sans droits, lance `sudo -l`.
+- **Usurpation ARP :** depuis une machine de test, `arpspoof -i <interface> -t <victime> <passerelle>` (paquet `dsniff`).
 
 ---
 
@@ -1326,6 +1403,8 @@ Les premiers jours, observe les alertes et ajuste la configuration :
 | Balises sur des services légitimes (mises à jour, sondes) | Ajoute le port dans `beacon.ignore_ports`, ou baisse `max_jitter` |
 | Alertes de volume pendant les sauvegardes cloud | Monte `volume.min_bytes` ou `volume.zscore`, ou mets le serveur de sauvegarde en `whitelist` |
 | Alertes DNS sur un antivirus ou un CDN qui utilise des noms aléatoires | Ajoute son domaine dans `dns.ignore_suffixes` |
+| Usurpation ARP sur deux cartes d'une même machine (bonding, Wi-Fi + Ethernet) ou une VM migrée | Vérifie les deux MAC des preuves ; mets l'IP en `whitelist` si le conflit est légitime |
+| Trafic entrant d'IP listées trop fréquent | C'est un signal bas, non envoyé au LLM ; filtre la sévérité `low` dans le dashboard |
 | Force brute sur un serveur de messagerie très sollicité | Monte `bruteforce.threshold` |
 | Trop d'alertes en attente d'IA | Passe `llm.min_severity` à `"high"` |
 | Anomalies de comportement répétées pour une activité légitime (sauvegarde du dimanche, mises à jour) | Réponds « C'est normal » avec la portée « désormais » : une exception évite la question jusqu'au prochain modèle, qui apprendra ce comportement |
@@ -1373,6 +1452,8 @@ Un outil de détection est une cible de choix : il voit tout le réseau. Plusieu
 - **Trafic chiffré :** seules les métadonnées sont analysées. Une exfiltration lente et régulière sous le seuil de volume passera inaperçue.
 - **Domaine DNS naïf :** le domaine est pris comme les deux derniers segments. `exemple.co.uk` est donc vu comme `co.uk`, ce qui peut fusionner des domaines distincts dans le détecteur de tunnel.
 - **Beaconing :** seul le TCP est suivi ; une balise en UDP ou QUIC n'est pas détectée.
+- **Listes de menaces :** lues au démarrage seulement ; une mise à jour demande un redémarrage, qui remet à zéro l'état des autres détecteurs.
+- **ARP :** seul l'ARP IPv4 est suivi ; l'équivalent IPv6 (NDP, usurpation de voisins ou de routeur) ne l'est pas. Une attaque déjà en place au démarrage de l'agent passe pour l'état normal jusqu'à ce que la vraie machine s'annonce.
 - **Fragmentation et IPv6 :** les fragments IP et les en-têtes d'extension IPv6 exotiques peuvent échapper au parsing.
 - **Historique :** sans `history.path`, 5 000 alertes au maximum, perdues au redémarrage. Avec, le dashboard et l'API ne montrent toujours que les 5 000 plus récentes ; le reste de la base se consulte avec `sqlite3`. Une analyse IA interrompue par l'arrêt ne reprend pas (l'alerte revient « non analysée »). L'apprentissage du volume repart de zéro.
 - **Un seul analyseur IA à la fois :** sur CPU, une rafale d'alertes peut prendre plusieurs minutes à être analysée.
@@ -1389,10 +1470,10 @@ Un outil de détection est une cible de choix : il voit tout le réseau. Plusieu
 - **Ingestion des alertes Suricata** (`eve.json`) et des logs Zeek, pour combiner signatures et comportement.
 - **Réponse active** optionnelle et validée par un humain : blocage d'IP via nftables.
 - **Apprentissage** : persister l'état du détecteur de volume, qui repart de zéro à chaque redémarrage, et le modèle candidat en attente de validation.
-- **Détections supplémentaires** : ARP spoofing, nouveaux appareils sur le réseau, connexions vers des IP de listes de menaces (abuse.ch, Spamhaus), TLS/JA3/JA4.
+- **Détections supplémentaires** : nouveaux appareils sur le réseau, usurpation NDP en IPv6, TLS/JA3/JA4, téléchargement et rechargement des listes de menaces sans redémarrage.
 - **Capture haute performance** avec AF_XDP ou eBPF.
 
-Les notifications (ntfy, webhook) et l'apprentissage du comportement normal par Isolation Forest, autrefois dans cette liste, sont implémentés : voir `[notify]` (section 7) et la section 3.9.
+Les notifications (ntfy, webhook), l'apprentissage du comportement normal par Isolation Forest, l'usurpation ARP et les listes de menaces, autrefois dans cette liste, sont implémentés : voir `[notify]` (section 7) et les sections 3.7, 3.8 et 3.11.
 
 ---
 

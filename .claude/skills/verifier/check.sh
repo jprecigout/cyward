@@ -11,7 +11,8 @@ set -euo pipefail
 # Racine du dépôt, quel que soit le dossier d'où le script est lancé.
 cd "$(dirname "$0")/../../.."
 
-# Alertes attendues au rejeu de examples/gen_attacks.rs : une sous-chaîne de titre par scénario.
+# Alertes attendues au rejeu de examples/gen_attacks.rs, avec la configuration examples/rejeu.toml
+# (qui charge la liste de menaces d'exemple) : une sous-chaîne de titre par scénario.
 # À mettre à jour quand un scénario est ajouté au générateur.
 EXPECTED_TITLES=(
   "Balise périodique"
@@ -20,6 +21,8 @@ EXPECTED_TITLES=(
   "Balayage du port"
   "Tunnel DNS probable"
   "Volume sortant anormal"
+  "Connexion vers une IP listée"
+  "Usurpation ARP"
 )
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
@@ -45,7 +48,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cargo run -q --example gen_attacks -- "$tmp/attaques.pcap" >/dev/null
 # NO_COLOR et redirection : sortie sans codes ANSI, comparable par texte.
-report=$(NO_COLOR=1 cargo run -q -- replay "$tmp/attaques.pcap" 2>/dev/null)
+report=$(NO_COLOR=1 cargo run -q -- -c examples/rejeu.toml replay "$tmp/attaques.pcap" 2>/dev/null)
 echo "$report"
 count=$(echo "$report" | sed -n 's/.*octets analysés, \([0-9]*\) alerte(s)/\1/p')
 [ "$count" = "${#EXPECTED_TITLES[@]}" ] || fail "$count alerte(s) au lieu de ${#EXPECTED_TITLES[@]}"

@@ -22,7 +22,7 @@ use crate::{
         baseline::{Baseline, WindowVerdict},
         features::{self, HostCounters, MAX_DSTS, MAX_PORTS},
     },
-    capture::PacketMeta,
+    capture::{PacketMeta, Proto},
     config::{AnomalyMode, DetectionConfig},
 };
 
@@ -90,6 +90,10 @@ impl HostAnomaly {
 impl Detector for HostAnomaly {
     fn on_packet(&mut self, p: &PacketMeta, out: &mut Vec<Alert>) {
         self.roll(p.ts, out);
+        // L'ARP n'est pas du trafic applicatif : il fausserait octets et destinations.
+        if p.proto == Proto::Arp {
+            return;
+        }
         let (src_local, dst_local) = (self.net.is_local(&p.src), self.net.is_local(&p.dst));
         if src_local && let Some(c) = self.counters(p.src) {
             c.bytes_out += u64::from(p.len);

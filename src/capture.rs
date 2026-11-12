@@ -2,6 +2,8 @@
 //!
 //! Chaque paquet est réduit à un [`PacketMeta`] (adresses, ports, drapeaux, taille, nom DNS)
 //! avant d'être transmis au moteur de détection. Le contenu applicatif n'est jamais conservé.
+//! Les trames ARP (IPv4 sur Ethernet) sont aussi transmises, avec l'adresse MAC de l'émetteur,
+//! pour repérer l'usurpation ARP.
 //!
 //! La capture live utilise `pnet_datalink`, qui ouvre une socket `AF_PACKET` (Linux) sans
 //! dépendre de libpcap. Elle requiert la capacité `CAP_NET_RAW`.
@@ -14,7 +16,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use etherparse::{NetSlice, SlicedPacket, TransportSlice};
+use etherparse::{ArpOperation, ArpPacketSlice, NetSlice, SlicedPacket, TransportSlice};
 use pcap_file::{DataLink, pcap::PcapReader};
 use pnet_datalink::{Channel, NetworkInterface};
 use tokio::sync::mpsc;
@@ -27,6 +29,8 @@ pub enum Proto {
     Tcp,
     Udp,
     Icmp,
+    /// Trame ARP : ni IP ni transport, voir [`PacketMeta::arp`].
+    Arp,
     Other,
 }
 
@@ -44,11 +48,29 @@ impl TcpFlags {
     }
 }
 
-/// Résumé d'un paquet IP : tout ce dont les détecteurs ont besoin, sans le contenu.
+/// Type de message ARP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArpOp {
+    /// « Qui a cette IP ? » (diffusé à tout le réseau local).
+    Request,
+    /// « Cette IP est à moi » ; non sollicitée, c'est un ARP gratuit.
+    Reply,
+}
+
+/// Contenu utile d'une trame ARP : l'association IP → MAC que l'émetteur annonce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArpInfo {
+    pub op: ArpOp,
+    /// Adresse MAC que l'émetteur associe à son IP (`PacketMeta::src`).
+    pub sender_mac: [u8; 6],
+}
+
+/// Résumé d'un paquet IP ou d'une trame ARP : tout ce dont les détecteurs ont besoin, sans le contenu.
 #[derive(Debug, Clone)]
 pub struct PacketMeta {
     /// Secondes depuis l'epoch (horloge de capture, ou celle du fichier pcap en rejeu).
     pub ts: f64,
+    /// Adresses IP source et destination ; pour l'ARP, IP de l'émetteur et IP demandée.
     pub src: IpAddr,
     pub dst: IpAddr,
     pub proto: Proto,
@@ -60,6 +82,8 @@ pub struct PacketMeta {
     pub tcp: TcpFlags,
     /// Nom demandé si c'est une requête DNS.
     pub dns_query: Option<String>,
+    /// Renseigné uniquement pour une trame ARP (`proto == Proto::Arp`).
+    pub arp: Option<ArpInfo>,
 }
 
 /// Format de la couche liaison des trames reçues, qui détermine où commence l'en-tête IP.
@@ -73,8 +97,8 @@ pub enum LinkType {
     RawIp,
 }
 
-/// Décode une trame et en extrait les métadonnées. Renvoie `None` pour ce qui n'est pas de
-/// l'IP (ARP…) ou pour une trame tronquée ou mal formée.
+/// Décode une trame et en extrait les métadonnées. Renvoie `None` pour ce qui n'est ni de
+/// l'IP ni de l'ARP IPv4 sur Ethernet, ou pour une trame tronquée ou mal formée.
 pub fn parse_packet(data: &[u8], link: LinkType, ts: f64) -> Option<PacketMeta> {
     // etherparse découpe la trame en couches sans copier les données.
     let sliced = match link {
@@ -88,7 +112,7 @@ pub fn parse_packet(data: &[u8], link: LinkType, ts: f64) -> Option<PacketMeta> 
     let (src, dst) = match sliced.net? {
         NetSlice::Ipv4(ip) => (IpAddr::V4(ip.header().source_addr()), IpAddr::V4(ip.header().destination_addr())),
         NetSlice::Ipv6(ip) => (IpAddr::V6(ip.header().source_addr()), IpAddr::V6(ip.header().destination_addr())),
-        NetSlice::Arp(_) => return None,
+        NetSlice::Arp(arp) => return parse_arp(&arp, data.len() as u32, ts),
     };
 
     let mut meta = PacketMeta {
@@ -101,6 +125,7 @@ pub fn parse_packet(data: &[u8], link: LinkType, ts: f64) -> Option<PacketMeta> 
         len: data.len() as u32,
         tcp: TcpFlags::default(),
         dns_query: None,
+        arp: None,
     };
 
     // Couche transport : complète les champs selon le protocole.
@@ -124,6 +149,29 @@ pub fn parse_packet(data: &[u8], link: LinkType, ts: f64) -> Option<PacketMeta> 
         _ => {}
     }
     Some(meta)
+}
+
+/// Réduit une trame ARP à l'association annoncée (IP et MAC de l'émetteur). Seul l'ARP
+/// Ethernet/IPv4 est gardé : l'IPv6 utilise NDP, et les autres variantes n'existent guère en pratique.
+fn parse_arp(arp: &ArpPacketSlice, len: u32, ts: f64) -> Option<PacketMeta> {
+    let arp = arp.to_packet().try_eth_ipv4().ok()?;
+    let op = match arp.operation {
+        ArpOperation::REQUEST => ArpOp::Request,
+        ArpOperation::REPLY => ArpOp::Reply,
+        _ => return None, // RARP, InARP… : sans intérêt ici
+    };
+    Some(PacketMeta {
+        ts,
+        src: IpAddr::V4(arp.sender_ipv4_addr()),
+        dst: IpAddr::V4(arp.target_ipv4_addr()),
+        proto: Proto::Arp,
+        sport: 0,
+        dport: 0,
+        len,
+        tcp: TcpFlags::default(),
+        dns_query: None,
+        arp: Some(ArpInfo { op, sender_mac: arp.sender_mac }),
+    })
 }
 
 /// Extrait le nom de la première question d'une requête DNS (sans gérer la compression,
@@ -320,5 +368,32 @@ mod tests {
         assert_eq!(m.proto, Proto::Tcp);
         assert_eq!(m.dport, 22);
         assert!(m.tcp.is_connection_start());
+    }
+
+    // Une réponse ARP est décodée : IP et MAC de l'émetteur, IP visée.
+    #[test]
+    fn parses_arp_reply() {
+        let arp = etherparse::ArpEthIpv4Packet {
+            operation: ArpOperation::REPLY,
+            sender_mac: [2, 0, 0, 0, 0, 9],
+            sender_ipv4: [192, 168, 1, 1],
+            target_mac: [2, 0, 0, 0, 0, 2],
+            target_ipv4: [192, 168, 1, 20],
+        };
+        let mut buf = Vec::new();
+        etherparse::PacketBuilder::ethernet2([2, 0, 0, 0, 0, 9], [2, 0, 0, 0, 0, 2]).arp(arp.to_arp_packet()).write(&mut buf).unwrap();
+        let m = parse_packet(&buf, LinkType::Ethernet, 1.0).unwrap();
+        assert_eq!(m.proto, Proto::Arp);
+        assert_eq!(m.src, "192.168.1.1".parse::<IpAddr>().unwrap());
+        assert_eq!(m.dst, "192.168.1.20".parse::<IpAddr>().unwrap());
+        assert_eq!(m.arp, Some(ArpInfo { op: ArpOp::Reply, sender_mac: [2, 0, 0, 0, 0, 9] }));
+    }
+
+    // Un paquet IP n'a pas d'information ARP.
+    #[test]
+    fn ip_packet_has_no_arp_info() {
+        let mut buf = Vec::new();
+        etherparse::PacketBuilder::ethernet2([1; 6], [2; 6]).ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64).udp(1000, 2000).write(&mut buf, &[]).unwrap();
+        assert!(parse_packet(&buf, LinkType::Ethernet, 1.0).unwrap().arp.is_none());
     }
 }

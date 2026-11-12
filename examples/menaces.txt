@@ -1,0 +1,5 @@
+# Liste de menaces d'exemple, chargée par examples/rejeu.toml pour le rejeu des attaques simulées.
+# Elle mêle les deux formats les plus courants : une IP par ligne (abuse.ch Feodo Tracker) et
+# un réseau CIDR suivi d'un commentaire « ; » (Spamhaus DROP). Adresses de documentation (RFC 5737).
+192.0.2.200
+192.0.2.128/25 ; SBL-EXEMPLE

@@ -54,6 +54,24 @@ window_secs = 300.0
 unique_subdomains_threshold = 150
 ignore_suffixes = ["in-addr.arpa", "ip6.arpa", "local"]
 
+# Trafic avec des IP de listes de menaces, lues au démarrage (vide = désactivé). Formats : une IP
+# ou un CIDR par ligne (commentaires # et ;), ou JSON lignes avec un champ « cidr ». Exemples :
+#   https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt  (serveurs C2 de botnets)
+#   https://www.spamhaus.org/drop/drop_v4.json                             (réseaux criminels)
+# Cyward ne télécharge rien : mettre à jour les fichiers (cron, timer systemd) puis redémarrer.
+[detection.threat_list]
+lists = []
+# Délai avant de signaler à nouveau un même couple (hôte interne, IP listée), en secondes.
+realert_secs = 3600.0
+
+# Usurpation ARP : deux MAC annoncées pour une même IP dans la fenêtre.
+[detection.arp]
+# Durée, en secondes, pendant laquelle une MAC reste active pour une IP ; au-delà, une nouvelle
+# MAC est un simple remplacement.
+window_secs = 3600.0
+# IP sensibles (passerelle, DNS…) : leur usurpation est de sévérité haute. Ex. ["192.168.1.1"]
+protected_ips = []
+
 [detection.auth]
 window_secs = 300
 failures_threshold = 6
