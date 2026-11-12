@@ -105,7 +105,7 @@ cyward/
 ├── .claude/skills/            # skills : verifier, nouveau-detecteur, nouvelle-regle-log, revue
 ├── assets/
 │   ├── index.html             # dashboard (embarqué dans le binaire à la compilation)
-│   └── logo.svg, logo-wordmark.svg, favicon.svg
+│   └── logo.svg, logo.png (512 px), logo-wordmark.svg, favicon.svg
 ├── examples/
 │   ├── gen_attacks.rs         # générateur de pcap d'attaques simulées
 │   ├── rejeu.toml             # configuration du rejeu (liste de menaces, passerelle)
