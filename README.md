@@ -251,7 +251,7 @@ flowchart LR
     subgraph ROOT["⑧ Racine de composition : main.rs crée et relie tous les composants"]
         NIC["interface réseau"] --> CAP["capture<br/>(thread)"]
         CAP == "⑤" ==> ENG["Engine"]
-        ENG -- "①" --> DETS["PortScan, BruteForce, SynFlood,<br/>Beaconing, Volume, Dns, HostAnomaly"]
+        ENG -- "①" --> DETS["PortScan, BruteForce, SynFlood,<br/>Beaconing, Volume, Dns, ArpSpoofing,<br/>ThreatList, HostAnomaly"]
         SUP["supervise"] -- "⑦" --> SRC["journalctl, tail"]
         SUP == "⑤" ==> LA["LogAnalyzer"]
         DETS -- "Alert::new(..).src(..)… ②" --> SINK["AlertSink ③"]
@@ -291,7 +291,7 @@ flowchart LR
 
 **Rôles dans Cyward :**
 - **Interface de stratégie** : le trait `Detector`.
-- **Stratégies concrètes** : `PortScan`, `BruteForce`, `SynFlood` (`scan.rs`), `Beaconing` (`beacon.rs`), `Volume` (`volume.rs`), `Dns` (`dns.rs`), et `HostAnomaly` (`anomaly.rs`), ajoutée seulement si l'apprentissage est activé.
+- **Stratégies concrètes** : `PortScan`, `BruteForce`, `SynFlood` (`scan.rs`), `Beaconing` (`beacon.rs`), `Volume` (`volume.rs`), `Dns` (`dns.rs`), `ArpSpoofing` (`arp.rs`), `ThreatList` (`threat.rs`), ajoutée seulement si une liste de menaces est configurée, et `HostAnomaly` (`anomaly.rs`), ajoutée seulement si l'apprentissage est activé.
 - **Contexte** : `Engine`, qui détient les stratégies sous forme de `Box<dyn Detector>` et leur distribue chaque paquet sans savoir ce qu'elles font.
 
 ```rust
