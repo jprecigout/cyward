@@ -116,6 +116,7 @@ cyward/
     ├── config.rs              # structures de configuration (TOML + valeurs par défaut)
     ├── alert.rs               # modèle d'alerte, AlertStore, AlertSink         ② ③ ④
     ├── stats.rs               # compteurs exposés au dashboard
+    ├── flows.rs               # résumé du trafic par seconde (onglet Flux)       ④
     ├── capture.rs             # capture live, rejeu pcap, parsing des paquets  ⑤
     ├── detect/
     │   ├── mod.rs             # trait Detector et moteur                       ①
@@ -194,7 +195,13 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 - Une autre tâche consomme la file de triage, une alerte à la fois.
 
 **`web.rs`** — observateur ④ (flux SSE), Middleware ⑥
-- Serveur `axum`. Il sert le dashboard, une API JSON et un flux Server-Sent Events pour les mises à jour en direct.
+- Serveur `axum`. Il sert le dashboard, une API JSON et deux flux Server-Sent Events : les alertes (`/api/events`) et le trafic résumé de l'onglet Flux (`/api/flows`).
+
+**`flows.rs`** — sujet ④ (`FlowHub`)
+- `FlowMeter` additionne paquets et octets par couple (source, destination, nature : TCP, UDP, DNS, ICMP, ARP) pendant une seconde de temps des paquets, puis produit un résumé limité aux 50 couples les plus lourds ; le reste est additionné dans « autres ». Logique pure, testée sans réseau.
+- `run_engine` (`main.rs`) l'alimente et publie les résumés par `FlowHub`, un canal `broadcast` comme celui des alertes, auquel s'abonne chaque onglet Flux ouvert.
+- **Aucun coût quand personne ne regarde** : le moteur ne compte rien tant qu'aucun onglet n'est abonné (vérifié une fois par seconde). Vue ouverte, le comptage coûte environ 45 ns par paquet, soit environ 0,5 % d'un cœur à 100 000 paquets/s.
+- **Mémoire bornée** : 10 000 couples par seconde au plus ; au-delà, les paquets vont directement dans « autres » (adresses usurpées).
 
 **`notify.rs`** — observateur ④, producteur/consommateur ⑤ ; `notify/channels.rs` — Strategy ①
 - Envoie une notification (ntfy, webhook générique) pour les attaques jugées malveillantes ou suspectes par l'IA, pour les alertes critiques sans attendre l'IA, et en repli pour les alertes graves restées sans verdict. Une alerte n'est notifiée qu'une fois, avec un plafond horaire.
@@ -232,7 +239,8 @@ Les dépendances vont dans un seul sens : les **producteurs** d'alertes (`detect
 | `anomaly/` | `alert`, `config` | `detect`, `llm`, `web`, `logs` |
 | `logs.rs` | `alert`, `config`, `stats` | `llm`, `web`, `detect` |
 | `llm.rs` | `alert`, `config`, `stats` | `detect`, `logs`, `web` |
-| `web.rs` | `alert`, `anomaly`, `names`, `stats` | `detect`, `logs`, `llm` |
+| `web.rs` | `alert`, `anomaly`, `flows`, `names`, `stats` | `detect`, `logs`, `llm` |
+| `flows.rs` | `capture` (`PacketMeta`) | `detect`, `logs`, `llm`, `web` |
 | `names.rs` | `alert` (`host_part`), `config` | `detect`, `logs`, `llm`, `web` |
 | `notify.rs` (et `notify/channels.rs`) | `alert`, `config` | `detect`, `logs`, `llm`, `web` |
 | `history.rs` (et `history/repository.rs`) | `alert`, `config` | `detect`, `logs`, `llm`, `web` |
@@ -240,7 +248,7 @@ Les dépendances vont dans un seul sens : les **producteurs** d'alertes (`detect
 
 `main.rs` est la **racine de composition** : c'est le seul endroit qui crée les composants et les relie entre eux (canaux, `Arc` partagés). Changer de serveur LLM, ou désactiver le triage IA, ne demande donc aucune modification des détecteurs.
 
-Autre principe de découpage : **la logique de décision ne fait pas d'entrées/sorties**. `parse_packet`, `parse_dns_query`, les détecteurs (seul `Blocklist::load` lit les listes de menaces, une fois, à la création du moteur), `LogAnalyzer::analyze`, `parse_analysis`, `banner::render`, la lecture des réponses DNS de `names.rs`, les caractéristiques, l'Isolation Forest et le diff de `anomaly/`, ainsi que le regroupement et la rétention de `history.rs`, ne touchent ni au réseau, ni aux fichiers, ni au LLM. Ils se testent avec de simples valeurs en mémoire, et les I/O restent en bordure (sockets, sous-processus, HTTP).
+Autre principe de découpage : **la logique de décision ne fait pas d'entrées/sorties**. `parse_packet`, `parse_dns_query`, les détecteurs (seul `Blocklist::load` lit les listes de menaces, une fois, à la création du moteur), `LogAnalyzer::analyze`, `parse_analysis`, `banner::render`, la lecture des réponses DNS de `names.rs`, les caractéristiques, l'Isolation Forest et le diff de `anomaly/`, ainsi que le regroupement et la rétention de `history.rs`, le résumé du trafic de `flows.rs`, ne touchent ni au réseau, ni aux fichiers, ni au LLM. Ils se testent avec de simples valeurs en mémoire, et les I/O restent en bordure (sockets, sous-processus, HTTP).
 
 ### Design patterns utilisés
 
@@ -252,6 +260,8 @@ flowchart LR
         NIC["interface réseau"] --> CAP["capture<br/>(thread)"]
         CAP == "⑤" ==> ENG["Engine"]
         ENG -- "①" --> DETS["PortScan, BruteForce, SynFlood,<br/>Beaconing, Volume, Dns, ArpSpoofing,<br/>ThreatList, HostAnomaly"]
+        ENG -. "résumé par seconde" .-> HUB["FlowHub"]
+        HUB -- "④" --> FSSE["onglets Flux du dashboard"]
         SUP["supervise"] -- "⑦" --> SRC["journalctl, tail"]
         SUP == "⑤" ==> LA["LogAnalyzer"]
         DETS -- "Alert::new(..).src(..)… ②" --> SINK["AlertSink ③"]
@@ -278,7 +288,7 @@ flowchart LR
 | ① | **Strategy** | `trait Detector`, `Engine` (`src/detect/`) ; `trait LogRule`, `LogAnalyzer` (`src/logs/rules.rs`) ; `trait Notifier` (`src/notify/channels.rs`) | Ajouter une détection réseau (y compris l'apprentissage du comportement normal), une règle de log ou un canal de notification sans toucher au code existant |
 | ② | **Builder** | `Alert::new(...).src(...)...` (`src/alert.rs`) | Construire lisiblement une alerte aux nombreux champs optionnels |
 | ③ | **Façade** | `AlertSink::emit` (`src/alert.rs`) ; `Baseline` (`src/anomaly/baseline.rs`) | Un point d'entrée unique qui masque un sous-système : stockage et triage des alertes ; cycle de vie du comportement normal |
-| ④ | **Observer** | `AlertStore` + canal `broadcast` → SSE (`src/alert.rs`, `src/web.rs`), notifications (`src/notify.rs`), historique (`src/history.rs`) | Prévenir un nombre inconnu de navigateurs, le service de notifications et l'historique sur disque à chaque changement |
+| ④ | **Observer** | `AlertStore` + canal `broadcast` → SSE (`src/alert.rs`, `src/web.rs`), notifications (`src/notify.rs`), historique (`src/history.rs`) ; `FlowHub` → onglets Flux (`src/flows.rs`) | Prévenir un nombre inconnu de navigateurs, le service de notifications et l'historique sur disque à chaque changement ; diffuser le trafic résumé aux onglets ouverts, et savoir quand il n'y en a aucun pour ne rien compter |
 | ⑤ | **Producteur/consommateur** | canaux `mpsc` (`main.rs`, `capture.rs`, `logs.rs`, `llm.rs`, `notify.rs`, `history.rs`) | Découpler des étages de vitesses très différentes |
 | ⑥ | **Middleware** | `auth`, `write_guard` (`src/web.rs`) | Appliquer le contrôle d'accès à toutes les routes, et un contrôle renforcé aux routes d'écriture, en un seul endroit |
 | ⑦ | **Superviseur** | `logs::supervise` (`src/logs.rs`) | Relancer une source de logs qui s'arrête |
@@ -375,6 +385,7 @@ pub fn emit(&self, alert: Alert) {
 - **Sujet** : `AlertStore`, qui possède l'émetteur `events: broadcast::Sender<AlertEvent>`.
 - **Événements** : `AlertEvent::New` et `AlertEvent::Update`.
 - **Observateurs** : chaque connexion SSE d'un navigateur, la tâche des notifications (`notify::watch`) et celle de l'historique (`history::watch`). Chacun s'abonne avec `subscribe()` et reçoit une copie de chaque événement.
+- **Second sujet** : `FlowHub` (`src/flows.rs`), qui diffuse le trafic résumé par seconde aux onglets Flux. Le moteur interroge aussi son nombre d'abonnés : sans observateur, il ne compte rien.
 
 ```rust
 // src/alert.rs — le sujet publie à chaque création ou mise à jour
@@ -921,6 +932,7 @@ docker compose run --rm --no-deps cyward
 | `cyward run --no-llm` | Sans triage IA |
 | `cyward replay capture.pcap` | Passe un pcap dans les détecteurs, affiche les alertes et quitte |
 | `cyward replay capture.pcap --serve` | Idem, puis garde le dashboard et le triage IA actifs |
+| `cyward replay capture.pcap --serve --speed 20` | Rejoue au rythme de la capture accéléré 20 fois, pour suivre l'onglet Flux. Le rejeu attend que l'onglet soit ouvert |
 | `cyward check-llm` | Teste la connexion au modèle |
 | `cyward check-notify` | Envoie une notification de test sur chaque canal de `[notify]` |
 
@@ -1200,6 +1212,8 @@ Ouvre `http://127.0.0.1:8080`, ou `http://hôte:8080/?token=…` si un jeton est
 - **Panneau « Comportement normal »** (si l'apprentissage est activé) : modèle actif ou progression de l'apprentissage (avec une barre d'avancement), fenêtres par statut, bouton « Lancer un apprentissage », retour à une version précédente. Quand un modèle candidat attend, son diff s'affiche machine par machine, avec « Accepter » ou « Refuser » pour chacune, « Tout accepter », « Tout refuser », et les machines peu actives repliées. Suivent les exceptions actives et les dernières décisions.
 - **Question « est-ce normal ? »** : dans le détail d'une anomalie, un motif, une portée, et les boutons « C'est normal » et « C'est suspect ». La réponse donnée s'affiche ensuite à la place.
 - **Liste des alertes** : mise à jour en direct, sans recharger la page. Le titre de la section indique combien d'alertes sont affichées. Une nouvelle alerte s'illumine brièvement. Le badge indique l'état du triage : en attente, verdict avec confiance, ou échec.
+- **Onglet « Flux »** : le trafic en direct. À gauche, les 8 machines qui émettent le plus (les autres sont regroupées) ; elles envoient vers Cyward des blocs dont la taille suit le volume et la couleur la nature (TCP, UDP, DNS, ICMP, ARP). Chaque nouvelle alerte fait sortir un bloc vers la colonne des alertes et entoure de rouge les machines concernées pendant une minute. En dessous, les alertes levées pendant l'observation ; un clic ouvre l'alerte dans l'onglet Alertes. Le bandeau donne le débit de la dernière seconde, et un bouton met l'animation en pause. Le flux n'est ouvert que lorsque l'onglet est affiché : le reste du temps, l'agent ne compte rien. Lien direct : `…/#flux`.
+  - Pour une démonstration : `cyward -c examples/rejeu.toml replay attaques.pcap --serve --speed 20`, puis ouvrir `http://127.0.0.1:8080/#flux`. À pleine vitesse, les 40 minutes du pcap passeraient en moins d'une seconde.
 - **Lien d'une notification** (`…/#alerte-12`) : le dashboard s'ouvre sur cette alerte, dépliée, filtres remis à zéro.
 - **Détail d'une alerte**, en cliquant dessus :
   - à gauche : description, source, cible, dates, occurrences et preuves brutes en JSON ;
@@ -1217,6 +1231,7 @@ Toutes les routes acceptent le jeton en `?token=` ou en `Authorization: Bearer �
 | `GET /api/alerts/{id}` | Une alerte |
 | `GET /api/stats` | `{ "stats": {...}, "alerts_by_severity": {...} }` |
 | `GET /api/events` | Flux SSE : `{"type":"new"\|"update","alert":{...}}` |
+| `GET /api/flows` | Flux SSE du trafic, une fois par seconde de trafic : `{"ts": 1794391200, "flows": [{"src": "192.168.1.20", "dst": "198.51.100.66", "kind": "tcp", "packets": 12, "bytes": 8400}], "other_packets": 0, "other_bytes": 0}` ; `kind` vaut `tcp`, `udp`, `dns`, `icmp`, `arp` ou `other`, 50 couples au plus |
 | `GET /api/names?ips=192.168.1.20,192.168.1.10:22` | Noms des machines (DNS inverse) : `{"192.168.1.20": "pc-salon.lan"}`, seulement pour les adresses qui en ont un ; 64 valeurs au plus |
 | `GET /api/baseline` | État de l'apprentissage : mode, fenêtres par statut, modèle actif, candidat et son diff, versions, exceptions, décisions récentes (`{"enabled": false}` s'il est désactivé) |
 | `POST /api/alerts/{id}/feedback` | Réponse à une anomalie : `{"verdict": "normal"\|"suspect", "reason": "Sauvegarde", "scope": "once"\|"always"}` |
@@ -1353,13 +1368,14 @@ Avec `AmbientCapabilities`, le `setcap` sur le binaire n'est pas nécessaire.
 cargo test
 ```
 
-152 tests couvrent :
+160 tests couvrent :
 - le parsing des paquets, du DNS et de l'ARP, et des formats de listes de menaces ;
 - chaque détecteur, cas positifs et négatifs (un scan lent ou un trafic irrégulier ne doivent pas déclencher), et le plafond mémoire des détecteurs exposés aux adresses usurpées ;
 - les règles de logs, cas positifs et négatifs (lignes ordinaires, regex personnalisée invalide), et le décodage des lignes journald et texte ;
 - la fusion des alertes ;
 - l'extraction du JSON renvoyé par le modèle ;
 - l'apprentissage du comportement normal : l'Isolation Forest (point isolé, reproductibilité, sérialisation), les caractéristiques, le diff (bruit, nouveau comportement, dérive), le cycle de vie complet avec ses garde-fous (validation obligatoire, réponses, exceptions, refus, fenêtres exclues, retour arrière, calcul en cours qui bloque les décisions concurrentes), la persistance (sauvegarde incrémentale, compaction, reprise de l'ancien format, ligne coupée) ;
+- le résumé du trafic par seconde de l'onglet Flux (cumul, 50 couples les plus lourds, plafond mémoire) et la cadence du rejeu ralenti ;
 - le contrôle d'accès des routes d'écriture et le résumé de la bannière.
 
 ### Simulation d'attaques

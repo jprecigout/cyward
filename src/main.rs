@@ -20,6 +20,7 @@ mod banner;
 mod capture;
 mod config;
 mod detect;
+mod flows;
 mod history;
 mod llm;
 mod logs;
@@ -45,6 +46,7 @@ use crate::{
     capture::PacketMeta,
     config::{AnomalyMode, Config},
     detect::Engine,
+    flows::{FlowHub, FlowMeter},
     history::History,
     stats::Stats,
 };
@@ -88,6 +90,10 @@ enum Command {
         /// Garder le dashboard et le triage LLM actifs après le rejeu.
         #[arg(long)]
         serve: bool,
+        /// Rejouer au rythme de la capture accéléré N fois (ex. 20) au lieu de la pleine vitesse,
+        /// pour suivre l'onglet Flux du dashboard. Avec --serve, le rejeu attend que l'onglet soit ouvert.
+        #[arg(long, value_name = "N", value_parser = parse_speed)]
+        speed: Option<f64>,
     },
     /// Liste les interfaces réseau disponibles.
     Interfaces,
@@ -148,7 +154,7 @@ async fn main() -> Result<()> {
             print!("{}", banner::render(&banner_info(&cfg, capture, baseline.as_deref()), banner::use_color()));
             run(cfg, baseline).await
         }
-        Command::Replay { file, serve } => replay(cfg, file, serve).await,
+        Command::Replay { file, serve, speed } => replay(cfg, file, serve, speed).await,
     }
 }
 
@@ -207,11 +213,20 @@ fn open_baseline(cfg: &Config) -> Result<Option<Arc<Baseline>>> {
     Ok(Some(Arc::new(Baseline::open(cfg.detection.anomaly.clone())?)))
 }
 
+/// Ce que `start_pipeline` rend à `run` et `replay` pour la suite.
+struct Pipeline {
+    /// Point d'entrée des alertes, à donner au moteur.
+    sink: AlertSink,
+    /// Historique, pour la dernière écriture à l'arrêt.
+    history: Option<History>,
+    /// Diffusion des résumés de trafic vers l'onglet Flux, à donner au moteur.
+    flows: FlowHub,
+}
+
 /// Démarre la partie commune à `run` et `replay --serve` : stockage des alertes, historique
 /// sur disque, worker LLM, entraîneur du comportement normal, notifications (chacun s'il est
-/// activé) et serveur web. Renvoie le point d'entrée des alertes, et l'historique pour la
-/// dernière écriture à l'arrêt.
-fn start_pipeline(cfg: &Config, stats: &Arc<Stats>, baseline: Option<Arc<Baseline>>) -> Result<(AlertSink, Option<History>)> {
+/// activé) et serveur web.
+fn start_pipeline(cfg: &Config, stats: &Arc<Stats>, baseline: Option<Arc<Baseline>>) -> Result<Pipeline> {
     *stats.started_at.lock() = Some(chrono::Utc::now());
     let store = Arc::new(AlertStore::new(STORE_CAPACITY, cfg.detection.alert_cooldown_secs));
     // En premier : les alertes rechargées sont dans le store avant que le dashboard ne les serve.
@@ -229,21 +244,22 @@ fn start_pipeline(cfg: &Config, stats: &Arc<Stats>, baseline: Option<Arc<Baselin
     // Le serveur web tourne dans sa propre tâche ; une erreur (port occupé…) est journalisée
     // sans arrêter la détection.
     let (listen, token) = (cfg.web.listen.clone(), cfg.web.token.clone());
-    let (web_sink, stats) = (sink.clone(), stats.clone());
+    let (web_sink, stats, flows) = (sink.clone(), stats.clone(), FlowHub::new());
+    let web_flows = flows.clone();
     // Les mêmes réseaux internes que la détection décident des adresses dont on demande le nom.
     let resolver = Arc::new(names::Resolver::new(cfg.names.clone(), cfg.detection.local_networks.clone()));
     tokio::spawn(async move {
-        if let Err(e) = web::serve(&listen, token, web_sink, stats, baseline, resolver).await {
+        if let Err(e) = web::serve(&listen, token, web_sink, stats, baseline, resolver, web_flows).await {
             tracing::error!("dashboard arrêté : {e:#}");
         }
     });
-    Ok((sink, history))
+    Ok(Pipeline { sink, history, flows })
 }
 
 /// Mode surveillance continue (`cyward run`).
 async fn run(cfg: Config, baseline: Option<Arc<Baseline>>) -> Result<()> {
     let stats = Arc::new(Stats::default());
-    let (sink, history) = start_pipeline(&cfg, &stats, baseline.clone())?;
+    let Pipeline { sink, history, flows } = start_pipeline(&cfg, &stats, baseline.clone())?;
 
     if cfg.capture.enabled {
         let iface = capture::pick_interface(&cfg.capture.interface)?;
@@ -255,7 +271,7 @@ async fn run(cfg: Config, baseline: Option<Arc<Baseline>>) -> Result<()> {
         // Moteur créé avant la capture : une liste de menaces illisible arrête tout de suite le démarrage.
         let engine = Engine::new(&cfg.detection, baseline.clone())?;
         capture::spawn_live(iface, cfg.capture.promiscuous, tx, stats.clone())?;
-        tokio::spawn(run_engine(engine, rx, sink.clone(), true));
+        tokio::spawn(run_engine(engine, rx, sink.clone(), Some(flows), true));
     }
 
     if cfg.logs.enabled {
@@ -288,7 +304,7 @@ async fn run(cfg: Config, baseline: Option<Arc<Baseline>>) -> Result<()> {
 }
 
 /// Mode rejeu (`cyward replay`) : passe un pcap dans les détecteurs puis affiche le bilan.
-async fn replay(mut cfg: Config, file: PathBuf, serve: bool) -> Result<()> {
+async fn replay(mut cfg: Config, file: PathBuf, serve: bool, speed: Option<f64>) -> Result<()> {
     // Sans --serve, personne ne verrait les analyses : inutile de solliciter le LLM.
     cfg.llm.enabled &= serve;
     // Les alertes d'un pcap (dates d'origine, attaques simulées) n'ont rien à faire dans
@@ -298,7 +314,7 @@ async fn replay(mut cfg: Config, file: PathBuf, serve: bool) -> Result<()> {
     // Le nom du fichier s'affiche à la place de l'interface dans le dashboard.
     *stats.interface.lock() = file.file_name().map(|n| n.to_string_lossy().into_owned());
     let baseline = open_baseline(&cfg)?;
-    let sink = if serve {
+    let (sink, flows) = if serve {
         // Bannière seulement avec --serve : sans, la sortie est un rapport destiné à être lu
         // ou traité par un script, que la bannière encombrerait.
         // Le rejeu ne lit jamais les logs système : on le reflète dans la config pour que le
@@ -306,16 +322,24 @@ async fn replay(mut cfg: Config, file: PathBuf, serve: bool) -> Result<()> {
         cfg.logs.enabled = false;
         let source = format!("rejeu de {}", file.display());
         print!("{}", banner::render(&banner_info(&cfg, source, baseline.as_deref()), banner::use_color()));
-        start_pipeline(&cfg, &stats, baseline.clone())?.0
+        let p = start_pipeline(&cfg, &stats, baseline.clone())?;
+        (p.sink, Some(p.flows))
     } else {
         // Store seul, sans dashboard ni LLM, assez grand pour garder toutes les alertes du fichier.
-        AlertSink::new(Arc::new(AlertStore::new(100_000, cfg.detection.alert_cooldown_secs)), None, cfg.llm.min_severity)
+        (AlertSink::new(Arc::new(AlertStore::new(100_000, cfg.detection.alert_cooldown_secs)), None, cfg.llm.min_severity), None)
     };
+    // Un rejeu ralenti sert à regarder l'onglet Flux : inutile de commencer avant qu'il soit ouvert.
+    if let (Some(_), Some(hub)) = (speed, &flows) {
+        tracing::info!("rejeu en attente : ouvrez l'onglet Flux du dashboard (http://{})", cfg.web.listen);
+        while !hub.is_watched() {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
 
     let (tx, rx) = mpsc::channel(4096);
     // `live = false` : pas de tick sur l'horloge murale, seul le temps du pcap compte.
-    let engine = tokio::spawn(run_engine(Engine::new(&cfg.detection, baseline.clone())?, rx, sink.clone(), false));
-    capture::replay(&file, tx, stats.clone()).await?;
+    let engine = tokio::spawn(run_engine(Engine::new(&cfg.detection, baseline.clone())?, rx, sink.clone(), flows, false));
+    capture::replay(&file, tx, stats.clone(), speed).await?;
     // `replay` a rendu l'émetteur du canal : le moteur termine dès qu'il a vidé la file.
     engine.await?;
     // Les fenêtres du pcap enrichissent l'apprentissage : on les enregistre tout de suite.
@@ -338,12 +362,29 @@ async fn replay(mut cfg: Config, file: PathBuf, serve: bool) -> Result<()> {
     Ok(())
 }
 
+/// Lit le facteur de `replay --speed` : un nombre strictement positif.
+fn parse_speed(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v > 0.0 && v.is_finite() => Ok(v),
+        _ => Err(format!("« {s} » : facteur de vitesse attendu, nombre strictement positif (ex. 20)")),
+    }
+}
+
 /// Boucle du moteur de détection : consomme les paquets et transmet les alertes produites.
 ///
 /// En mode live, un tick par seconde sur l'horloge murale permet aux détecteurs de clore
-/// leurs fenêtres même quand aucun paquet n'arrive.
-async fn run_engine(mut engine: Engine, mut rx: mpsc::Receiver<PacketMeta>, sink: AlertSink, live: bool) {
+/// leurs fenêtres même quand aucun paquet n'arrive. `flows` : diffusion des résumés de trafic
+/// vers l'onglet Flux (None sans dashboard).
+async fn run_engine(mut engine: Engine, mut rx: mpsc::Receiver<PacketMeta>, sink: AlertSink, flows: Option<FlowHub>, live: bool) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut meter = FlowMeter::new();
+    // Ne compte que si un onglet regarde : sinon la vue ne coûte rien au chemin critique.
+    fn watched(flows: &Option<FlowHub>) -> Option<&FlowHub> {
+        flows.as_ref().filter(|h| h.is_watched())
+    }
+    // `is_watched` prend un verrou interne au canal : on ne le consulte qu'une fois par seconde
+    // de temps des paquets, pas à chaque paquet. (seconde de la dernière vérification, résultat)
+    let mut watch: (f64, Option<FlowHub>) = (f64::NAN, None);
     // Horodatage du dernier paquet vu, pour le tick de fin de rejeu.
     let mut last_ts = 0.0;
     loop {
@@ -352,6 +393,14 @@ async fn run_engine(mut engine: Engine, mut rx: mpsc::Receiver<PacketMeta>, sink
             p = rx.recv() => match p {
                 Some(p) => {
                     last_ts = p.ts;
+                    if p.ts.floor() != watch.0 {
+                        watch = (p.ts.floor(), watched(&flows).cloned());
+                    }
+                    if let Some(hub) = &watch.1
+                        && let Some(s) = meter.record(&p)
+                    {
+                        hub.publish(s);
+                    }
                     for a in engine.process(&p) {
                         sink.emit(a);
                     }
@@ -364,12 +413,23 @@ async fn run_engine(mut engine: Engine, mut rx: mpsc::Receiver<PacketMeta>, sink
                 for a in engine.tick(now) {
                     sink.emit(a);
                 }
+                // Clôt la seconde de trafic même quand plus aucun paquet n'arrive.
+                if let Some(hub) = watched(&flows)
+                    && let Some(s) = meter.flush(now)
+                {
+                    hub.publish(s);
+                }
             }
         }
     }
-    // Fin de rejeu : clore les fenêtres en cours (volume notamment).
+    // Fin de rejeu : clore les fenêtres en cours (volume notamment), et la dernière seconde de trafic.
     for a in engine.tick(last_ts + 3600.0) {
         sink.emit(a);
+    }
+    if let Some(hub) = watched(&flows)
+        && let Some(s) = meter.flush(last_ts + 1.0)
+    {
+        hub.publish(s);
     }
 }
 
@@ -380,6 +440,16 @@ mod tests {
     // Valeur d'une ligne du résumé, par son libellé.
     fn value<'a>(info: &'a [(&str, String)], label: &str) -> &'a str {
         info.iter().find(|(l, _)| *l == label).map(|(_, v)| v.as_str()).unwrap()
+    }
+
+    // Le facteur de vitesse du rejeu doit être un nombre strictement positif.
+    #[test]
+    fn speed_must_be_positive() {
+        assert_eq!(parse_speed("20"), Ok(20.0));
+        assert_eq!(parse_speed("0.5"), Ok(0.5));
+        for bad in ["0", "-3", "abc", "inf", "NaN"] {
+            assert!(parse_speed(bad).is_err(), "{bad}");
+        }
     }
 
     // Configuration par défaut : dashboard sans jeton, journald seul, modèle par défaut.

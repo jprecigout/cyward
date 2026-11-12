@@ -7,6 +7,7 @@
 //! | `GET /api/alerts/{id}`              | Une alerte                                           |
 //! | `GET /api/stats`                    | Compteurs et nombre d'alertes par sévérité           |
 //! | `GET /api/events`                   | Flux Server-Sent Events des créations et mises à jour |
+//! | `GET /api/flows`                    | Flux SSE des résumés de trafic par seconde (onglet Flux) |
 //! | `GET /api/baseline`                 | État de l'apprentissage du comportement normal       |
 //! | `GET /api/names?ips=a,b`            | Noms des machines (DNS inverse) des adresses données |
 //! | `POST /api/alerts/{id}/feedback`    | Réponse « est-ce normal ? » à une anomalie           |
@@ -40,6 +41,7 @@ use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use crate::{
     alert::{AlertKind, AlertSink, Feedback, FeedbackScope, FeedbackVerdict},
     anomaly::{baseline::Baseline, trainer},
+    flows::FlowHub,
     names::{self, Resolver},
     stats::Stats,
 };
@@ -60,11 +62,13 @@ struct AppState {
     baseline: Option<Arc<Baseline>>,
     /// Noms des machines affichés à côté des adresses.
     names: Arc<Resolver>,
+    /// Résumés de trafic publiés par le moteur pour l'onglet Flux.
+    flows: FlowHub,
 }
 
 /// Démarre le serveur et ne rend la main qu'en cas d'erreur.
-pub async fn serve(listen: &str, token: String, sink: AlertSink, stats: Arc<Stats>, baseline: Option<Arc<Baseline>>, names: Arc<Resolver>) -> Result<()> {
-    let state = AppState { sink, stats, token: Arc::new(token), baseline, names };
+pub async fn serve(listen: &str, token: String, sink: AlertSink, stats: Arc<Stats>, baseline: Option<Arc<Baseline>>, names: Arc<Resolver>, flows: FlowHub) -> Result<()> {
+    let state = AppState { sink, stats, token: Arc::new(token), baseline, names, flows };
     // Routes d'écriture : un second middleware, appliqué à elles seules, exige le jeton en en-tête.
     let writes = Router::new()
         .route("/api/alerts/{id}/feedback", post(feedback))
@@ -78,6 +82,7 @@ pub async fn serve(listen: &str, token: String, sink: AlertSink, stats: Arc<Stat
         .route("/api/alerts/{id}", get(get_alert))
         .route("/api/stats", get(get_stats))
         .route("/api/events", get(events))
+        .route("/api/flows", get(flow_events))
         .route("/api/baseline", get(baseline_status))
         .route("/api/names", get(get_names))
         .merge(writes)
@@ -170,6 +175,14 @@ async fn events(State(s): State<AppState>) -> Sse<impl Stream<Item = Result<Even
     // simplement sautés, le client se resynchronise en rechargeant la liste.
     let stream = BroadcastStream::new(s.sink.store.subscribe()).filter_map(|r| r.ok().and_then(|e| Event::default().json_data(e).ok()).map(Ok));
     // Le keep-alive envoie un commentaire périodique pour que les proxys ne coupent pas la connexion.
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Flux SSE des résumés de trafic. Tant qu'il est ouvert, le moteur compte le trafic ; quand
+/// le dernier onglet le ferme, l'abonnement disparaît et le moteur cesse de compter.
+async fn flow_events(State(s): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // Comme pour /api/events, un onglet en retard saute simplement les secondes manquées.
+    let stream = BroadcastStream::new(s.flows.subscribe()).filter_map(|r| r.ok().and_then(|f| Event::default().json_data(&*f).ok()).map(Ok));
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 

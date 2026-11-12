@@ -21,7 +21,8 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
   | `anomaly/` | `alert`, `config` |
   | `logs.rs` (et `logs/rules.rs`) | `alert`, `config`, `stats` |
   | `llm.rs` | `alert`, `config`, `stats` |
-  | `web.rs` | `alert`, `anomaly`, `names`, `stats` |
+  | `web.rs` | `alert`, `anomaly`, `flows`, `names`, `stats` |
+  | `flows.rs` | `capture` (`PacketMeta`) |
   | `names.rs` | `alert`, `config` |
   | `notify.rs` (et `notify/channels.rs`) | `alert`, `config` |
 | `history.rs` (et `history/repository.rs`) | `alert`, `config` |
@@ -35,7 +36,7 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
   | Strategy (trait + objets `Box<dyn …>`) | `trait Detector`, `Engine` ; `trait LogRule`, `LogAnalyzer` (`logs/rules.rs`) ; `trait Notifier` (`notify/channels.rs`) | Tout nouveau détecteur, règle de log, canal de notification ou analyseur interchangeable |
   | Builder | `Alert::new(...).src(...).dst(...).evidence(...)` | Construire des objets à nombreux champs optionnels |
   | Façade / point d'entrée unique | `AlertSink::emit` ; `Baseline` (`anomaly/baseline.rs`) | Tout ce qui produit des alertes : ne jamais écrire directement dans le store ou la file LLM. Tout ce qui touche au comportement normal passe par `Baseline`, qui applique les garde-fous de validation |
-  | Observer (publication/abonnement) | `AlertStore` + `broadcast` → clients SSE, notifications (`notify.rs`), historique (`history.rs`) | Diffuser des événements à plusieurs consommateurs |
+  | Observer (publication/abonnement) | `AlertStore` + `broadcast` → clients SSE, notifications (`notify.rs`), historique (`history.rs`) ; `FlowHub` (`flows.rs`) → onglets Flux | Diffuser des événements à plusieurs consommateurs |
   | Producteur/consommateur (pipeline par canaux) | capture → moteur, sources de logs → analyseur, sink → LLM | Découpler un producteur rapide d'un consommateur lent (canal borné, `try_send` si le producteur ne doit pas bloquer) |
   | Middleware (chaîne de responsabilité) | `auth`, et `write_guard` sur les routes d'écriture (`web.rs`) | Comportements transverses du serveur web ; toute nouvelle route d'écriture va dans le routeur protégé par `write_guard` |
   | Superviseur | `logs::supervise` | Tâche externe à relancer après une panne |
@@ -138,6 +139,7 @@ flowchart LR
     STORE -- "broadcast" --> WEB["web.rs (SSE)"]
     STORE -- "broadcast" --> NOTIF["notify.rs (décision)"] -- "mpsc" --> CH["ntfy, webhook"]
     STORE -- "broadcast" --> HIST["history.rs (lots)"] -- "mpsc" --> SQL["thread SQLite<br/>(history.path)"]
+    RE -- "FlowMeter : résumé/s<br/>(seulement si un onglet regarde)" --> HUB["flows::FlowHub"] -- "broadcast" --> WEB
 
     HA["detect/anomaly.rs<br/>(HostAnomaly)"] --> BL["anomaly::Baseline"]
     TR["anomaly::trainer<br/>(périodique)"] --> BL
@@ -197,7 +199,9 @@ Les règles de logs vivent dans `logs/rules.rs` : une struct par règle qui impl
 
 ## Dashboard
 
-`assets/index.html` est une page unique en JS vanilla, **embarquée à la compilation** par `include_str!` dans `web.rs`. Après une modification, il faut recompiler et relancer le serveur pour la voir.
+`assets/index.html` est une page unique en JS vanilla, avec deux onglets : Alertes et Flux. L'onglet Flux dessine sur un `<canvas>` (texte par `fillText`, jamais interprété) et n'ouvre `/api/flows` que lorsqu'il est affiché, car le moteur ne compte le trafic que s'il a un abonné (`FlowHub::is_watched`, consulté une fois par seconde, car il prend un verrou). Pour le voir en action : `replay … --serve --speed 20`, qui attend l'ouverture de l'onglet.
+
+La page est **embarquée à la compilation** par `include_str!` dans `web.rs`. Après une modification, il faut recompiler et relancer le serveur pour la voir.
 
 Les données affichées viennent du réseau et des logs, donc potentiellement d'un attaquant. Le DOM est construit uniquement via le helper `el()` (textContent) : ne jamais utiliser `innerHTML` avec des données d'alerte.
 

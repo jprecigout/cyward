@@ -300,8 +300,18 @@ pub fn spawn_live(iface: NetworkInterface, promiscuous: bool, tx: mpsc::Sender<P
     Ok(())
 }
 
-/// Rejoue un fichier pcap (format tcpdump classique) à pleine vitesse, avec ses horodatages d'origine.
-pub async fn replay(path: &Path, tx: mpsc::Sender<PacketMeta>, stats: Arc<Stats>) -> Result<()> {
+/// Délai à attendre avant de transmettre un paquet pour respecter le rythme du pcap accéléré
+/// `speed` fois. `offset` : écart entre ce paquet et le premier, en secondes de temps du pcap ;
+/// `elapsed` : temps réel écoulé depuis le premier, en secondes. None = le paquet part tout de suite.
+pub fn pace_delay(offset: f64, elapsed: f64, speed: f64) -> Option<std::time::Duration> {
+    let wait = offset / speed - elapsed;
+    // En dessous d'une milliseconde, attendre coûterait plus que l'écart à corriger.
+    (wait > 0.001).then(|| std::time::Duration::from_secs_f64(wait))
+}
+
+/// Rejoue un fichier pcap (format tcpdump classique) avec ses horodatages d'origine : à pleine
+/// vitesse, ou au rythme de la capture accéléré `speed` fois (pour suivre la vue des flux).
+pub async fn replay(path: &Path, tx: mpsc::Sender<PacketMeta>, stats: Arc<Stats>, speed: Option<f64>) -> Result<()> {
     let file = std::fs::File::open(path).with_context(|| format!("ouverture de {}", path.display()))?;
     let mut reader = PcapReader::new(std::io::BufReader::new(file)).context("fichier pcap invalide (pcapng non supporté : convertir avec `editcap -F pcap`)")?;
     // Le type de lien est déclaré une fois dans l'en-tête global du fichier.
@@ -311,8 +321,17 @@ pub async fn replay(path: &Path, tx: mpsc::Sender<PacketMeta>, stats: Arc<Stats>
         DataLink::RAW | DataLink::IPV4 | DataLink::IPV6 => LinkType::RawIp,
         other => bail!("type de lien pcap non supporté : {other:?}"),
     };
+    // Instant réel et horodatage du premier paquet, référence du rythme quand `speed` est donné.
+    let mut origin: Option<(tokio::time::Instant, f64)> = None;
     while let Some(pkt) = reader.next_packet() {
         let pkt = pkt?;
+        if let Some(speed) = speed {
+            let ts = pkt.timestamp.as_secs_f64();
+            let (start, first) = *origin.get_or_insert((tokio::time::Instant::now(), ts));
+            if let Some(d) = pace_delay(ts - first, start.elapsed().as_secs_f64(), speed) {
+                tokio::time::sleep(d).await;
+            }
+        }
         stats.packets.fetch_add(1, Ordering::Relaxed);
         stats.bytes.fetch_add(pkt.orig_len as u64, Ordering::Relaxed);
         if let Some(mut meta) = parse_packet(&pkt.data, link, pkt.timestamp.as_secs_f64()) {
@@ -341,6 +360,16 @@ mod tests {
         // Fin du nom, type A (1), classe IN (1).
         p.extend_from_slice(&[0, 0, 1, 0, 1]);
         p
+    }
+
+    // Un paquet en avance sur le rythme attend ; un paquet en retard, ou à moins d'1 ms près, part tout de suite.
+    #[test]
+    fn replay_pacing() {
+        // 10 s de pcap à ×20 = 0,5 s réelle ; 0,2 s déjà écoulées → 0,3 s d'attente.
+        let d = pace_delay(10.0, 0.2, 20.0).unwrap();
+        assert!((d.as_secs_f64() - 0.3).abs() < 1e-9);
+        assert_eq!(pace_delay(10.0, 0.6, 20.0), None);
+        assert_eq!(pace_delay(0.01, 0.0, 20.0), None);
     }
 
     #[test]
