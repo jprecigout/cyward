@@ -60,7 +60,7 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
 - **Concurrence** : aucun verrou tenu à travers un `.await`, ni pendant une I/O ou un calcul long. Une I/O bloquante ou un calcul coûteux passe par `spawn_blocking` ou un thread dédié. Les canaux sont bornés.
 - **Performance** : itérateurs plutôt que boucles indexées, pas d'allocation dans le cas courant du chemin critique, collections dimensionnées quand la taille est connue. On mesure (rejeu en `--release`) avant d'optimiser ce qui n'est pas évident, et la lisibilité n'est sacrifiée qu'à un gain mesuré.
 - **Nommage** : conventions Rust (`snake_case`, `CamelCase`, `SCREAMING_SNAKE_CASE` ; conversions `as_`, `to_`, `into_` ; pas de préfixe `get_` sur un accesseur, les handlers HTTP `get_*` de `web.rs` nommant la méthode GET), noms en anglais pour le code, commentaires et textes en français.
-- **Format** : le code n'est **pas** formaté par rustfmt (lignes longues assumées). Ne jamais lancer `cargo fmt` sur le projet, ce qui reformaterait des centaines de blocs : suivre le style des fichiers voisins.
+- **Format** : tout le code est formaté par rustfmt, selon `rustfmt.toml` (140 colonnes, `use_small_heuristics = "Max"`, options stables seulement). Lancer `cargo fmt` avant de considérer une modification terminée ; `cargo fmt --check` doit passer. Ne pas désactiver rustfmt localement (`#[rustfmt::skip]`) sans justification en commentaire, et ne pas changer `rustfmt.toml` dans une modification qui touche aussi du code : un reformatage se commite seul (`style: …`).
 - **Dépendances** : peu nombreuses, maintenues et en pur Rust (`cargo build` sans libpcap ni OpenSSL). Une nouvelle crate se justifie par un besoin que la bibliothèque standard ou une dépendance existante ne couvre pas.
 
 **Documentation dans `docs/`, toujours à jour (obligatoire)** : toute la documentation du projet s'écrit dans `docs/`, un fichier par sujet, référencé dans l'index [docs/README.md](docs/README.md). Le README racine reste court : présentation, fonctionnalités, lancement avec Docker, lien vers `docs/`, licence. Une nouvelle documentation va dans `docs/` (fichier existant ou nouveau fichier ajouté à l'index), jamais dans le README ; une fonctionnalité visible pour l'utilisateur s'ajoute aussi en une ligne à la liste « Fonctionnalités » du README. Les renvois entre documents sont des liens Markdown relatifs (`[configuration](configuration.md#notify)`), pas des numéros de section.
@@ -84,7 +84,7 @@ Le reste de `docs/` suit la même règle : détecteurs ([detecteurs.md](docs/det
 **Tests :**
 - chaque nouvelle fonctionnalité, détecteur, règle de log ou correction de bug a des tests unitaires dans son module (`#[cfg(test)] mod tests`), avec au moins un cas **positif** (ça détecte) et un cas **négatif** (le trafic ou les logs normaux ne déclenchent rien) ;
 - une correction de bug commence par un test qui reproduit le bug ;
-- avant de considérer le travail fini, lancer `cargo test` (tout doit passer) et `cargo clippy --all-targets` (aucun avertissement) ;
+- avant de considérer le travail fini, lancer `cargo fmt`, `cargo test` (tout doit passer) et `cargo clippy --all-targets` (aucun avertissement) ;
 - toute modification de la détection se vérifie aussi par le rejeu de `examples/gen_attacks.rs` avec `-c examples/rejeu.toml`, qui doit toujours donner 8 alertes. Si un nouveau détecteur est ajouté, ajouter son scénario au générateur et mettre à jour le nombre attendu ici et dans `docs/tests.md` ;
 - toute modification du dashboard se vérifie dans un navigateur, après recompilation (la page est embarquée dans le binaire).
 
@@ -112,7 +112,7 @@ Dans `.claude/skills/`, à utiliser plutôt que de réinventer la démarche :
 
 | Skill | Rôle |
 |---|---|
-| `/verifier` | Vérification complète avant de déclarer un travail fini : en-têtes `//!`, build, clippy `-D warnings`, tests, rejeu exigeant exactement les alertes attendues (`check.sh`, `--docker` en option) |
+| `/verifier` | Vérification complète avant de déclarer un travail fini : en-têtes `//!`, formatage rustfmt, build, clippy `-D warnings`, tests, rejeu exigeant exactement les alertes attendues (`check.sh`, `--docker` en option) |
 | `/nouveau-detecteur` | Ajout d'un détecteur réseau : règles du chemin critique, étapes (config, `AlertKind`, `Engine`, tests, scénario, docs), modèle de code testé |
 | `/nouvelle-regle-log` | Ajout d'une règle sur les logs : choix entre règle de config et règle en Rust, tests sur de vraies lignes |
 | `/revue` | Revue de code senior avec la grille propre à Cyward (structure et design patterns, temps des paquets, seuils `==`, mémoire bornée, sécurité du dashboard et du LLM) |
@@ -127,6 +127,7 @@ cargo test                       # tous les tests (unitaires, dans chaque module
 cargo test detect::scan          # tests d'un module
 cargo test detects_ssh_bruteforce   # un seul test (filtre sur le nom)
 cargo clippy --all-targets       # doit rester sans avertissement
+cargo fmt                        # formate le code (rustfmt.toml) ; cargo fmt --check vérifie sans modifier
 ```
 
 Test de bout en bout sans réseau ni droits : générer un pcap d'attaques simulées puis le rejouer. Avec `examples/rejeu.toml` (liste de menaces d'exemple, passerelle protégée), le rejeu doit produire 8 alertes (balise C2 ×12, force brute, scan, balayage, tunnel DNS, IP listée, usurpation ARP, volume) ; sans, 7 (pas de liste de menaces) :

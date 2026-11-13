@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Vérification complète de Cyward : en-têtes de commentaires, compilation, clippy, tests,
+# Vérification complète de Cyward : en-têtes de commentaires, formatage, compilation, clippy, tests,
 # puis rejeu de bout en bout du pcap d'attaques simulées.
 #
 #   .claude/skills/verifier/check.sh            # vérification standard (~1 min)
@@ -31,6 +31,10 @@ fail() { printf '\033[31mÉCHEC : %s\033[0m\n' "$1" >&2; exit 1; }
 step "En-têtes de module (//!) dans chaque fichier Rust"
 missing=$(for f in $(find src examples -name '*.rs'); do head -1 "$f" | grep -q '^//!' || echo "$f"; done)
 [ -z "$missing" ] || fail "fichiers sans en-tête //! : $missing"
+echo "ok"
+
+step "Formatage (rustfmt, règles de rustfmt.toml)"
+cargo fmt --check >/dev/null || fail "code non formaté : lancer cargo fmt (cargo fmt --check montre l'écart)"
 echo "ok"
 
 step "Compilation"

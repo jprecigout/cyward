@@ -32,7 +32,7 @@ Lire chaque fichier modifié **en entier**, ainsi que les appelants des fonction
 - Emprunts plutôt que clones ; un `clone()` ou une allocation sur le chemin critique est justifié par un commentaire.
 - Types qui excluent les états invalides (enums, `Option`), traits standard dérivés, visibilité minimale (`pub(crate)`, `pub(super)`).
 - Aucun `unsafe` ; aucun verrou tenu à travers un `.await` ni pendant une I/O ; canaux bornés.
-- Conventions de nommage Rust. Pas de reformatage par `cargo fmt` : le diff ne doit contenir que des changements voulus.
+- Conventions de nommage Rust. Code formaté par rustfmt (`cargo fmt --check` passe) ; un reformatage massif ne se mélange pas à une modification de fond.
 
 ### Justesse de la détection
 - Les détecteurs utilisent-ils uniquement le temps des paquets (`p.ts`, `now` de `tick`) ? Un `SystemTime::now()` dans `src/detect/` casse le rejeu.

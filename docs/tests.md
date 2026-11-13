@@ -1,12 +1,23 @@
 # Tests et simulation d'attaques
 
+## Qualité du code
+
+Avant de proposer une modification, le code doit être formaté et sans avertissement :
+
+```bash
+cargo fmt                    # formate selon rustfmt.toml ; cargo fmt --check vérifie sans modifier
+cargo clippy --all-targets   # aucun avertissement toléré
+```
+
+Le script `.claude/skills/verifier/check.sh` enchaîne ces contrôles, les tests et le rejeu ci-dessous.
+
 ## Tests unitaires
 
 ```bash
 cargo test
 ```
 
-160 tests couvrent :
+170 tests couvrent :
 - le parsing des paquets, du DNS et de l'ARP, et des formats de listes de menaces ;
 - chaque détecteur, cas positifs et négatifs (un scan lent ou un trafic irrégulier ne doivent pas déclencher), et le plafond mémoire des détecteurs exposés aux adresses usurpées ;
 - les règles de logs, cas positifs et négatifs (lignes ordinaires, regex personnalisée invalide), et le décodage des lignes journald et texte ;

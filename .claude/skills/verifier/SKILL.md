@@ -1,6 +1,6 @@
 ---
 name: verifier
-description: Vérifie que Cyward est en état d'être livré (compilation, clippy sans avertissement, tests, en-têtes de commentaires, rejeu des attaques simulées, image Docker en option). À utiliser avant de déclarer une tâche terminée, avant un commit, ou quand on demande de vérifier, tester, valider, check ou verify le projet.
+description: Vérifie que Cyward est en état d'être livré (formatage rustfmt, compilation, clippy sans avertissement, tests, en-têtes de commentaires, rejeu des attaques simulées, image Docker en option). À utiliser avant de déclarer une tâche terminée, avant un commit, ou quand on demande de vérifier, tester, valider, check ou verify le projet.
 ---
 
 # Vérifier Cyward
@@ -14,10 +14,11 @@ Lance le script de vérification depuis la racine du dépôt :
 Il enchaîne, et s'arrête à la première étape en échec (code de sortie non nul) :
 
 1. **En-têtes `//!`** : chaque fichier de `src/` et `examples/` doit commencer par un commentaire de module (règle de CLAUDE.md).
-2. **Compilation** de tout le projet, exemples compris.
-3. **Clippy** en `-D warnings` : un seul avertissement suffit à échouer.
-4. **Tests unitaires** (`cargo test`).
-5. **Rejeu de bout en bout** : génère le pcap de `examples/gen_attacks.rs`, le rejoue, et exige **exactement** les alertes listées dans `EXPECTED_TITLES` en haut du script, sans aucune en trop. Une alerte manquante = régression de détection ; une alerte en trop = faux positif sur le trafic normal.
+2. **Formatage** : `cargo fmt --check`, selon les règles de `rustfmt.toml`.
+3. **Compilation** de tout le projet, exemples compris.
+4. **Clippy** en `-D warnings` : un seul avertissement suffit à échouer.
+5. **Tests unitaires** (`cargo test`).
+6. **Rejeu de bout en bout** : génère le pcap de `examples/gen_attacks.rs`, le rejoue, et exige **exactement** les alertes listées dans `EXPECTED_TITLES` en haut du script, sans aucune en trop. Une alerte manquante = régression de détection ; une alerte en trop = faux positif sur le trafic normal.
 
 Ajoute `--docker` pour construire aussi l'image et y rejouer le pcap :
 
@@ -28,7 +29,7 @@ Ajoute `--docker` pour construire aussi l'image et y rejouer le pcap :
 ## Quand l'utiliser
 
 - Avant d'annoncer qu'une modification est terminée : c'est la preuve que les règles « commenté et testé » de CLAUDE.md sont respectées.
-- Après tout changement dans `src/detect/`, `src/logs.rs`, `src/logs/` ou `examples/gen_attacks.rs`.
+- Après tout changement dans `src/detect.rs`, `src/detect/`, `src/logs.rs`, `src/logs/` ou `examples/gen_attacks.rs`.
 - `--docker` seulement si le `Dockerfile`, `compose.yaml`, `docker/` ou les dépendances (`Cargo.toml`) ont changé : la construction prend plusieurs minutes.
 
 ## Lire un échec
@@ -36,6 +37,7 @@ Ajoute `--docker` pour construire aussi l'image et y rejouer le pcap :
 | Message | Cause probable |
 |---|---|
 | `fichiers sans en-tête //!` | Nouveau fichier Rust sans commentaire de module |
+| `code non formaté` | Lancer `cargo fmt`, puis relancer le script |
 | erreur clippy | Corriger le code ; ne pas ajouter de `#[allow]` sans justification en commentaire |
 | `N alerte(s) au lieu de M` | Un détecteur ne déclenche plus (régression) ou déclenche sur le trafic normal (faux positif). Comparer le bilan affiché avec `EXPECTED_TITLES` |
 | `alerte attendue absente : « … »` | Le titre d'une alerte a changé, ou son détecteur ne déclenche plus |

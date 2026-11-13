@@ -3,6 +3,7 @@
 ```
 cyward/
 ├── Cargo.toml
+├── rustfmt.toml               # règles de formatage du code (cargo fmt)
 ├── config.example.toml        # configuration commentée, toutes valeurs par défaut
 ├── Dockerfile, compose.yaml   # image et déploiement Docker
 ├── docker/cyward.toml         # configuration utilisée par l'image Docker
