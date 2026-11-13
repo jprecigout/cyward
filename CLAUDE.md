@@ -12,6 +12,8 @@ Les commentaires, messages de log, textes d'alerte, prompts du LLM et l'interfac
 
 Toute modification de code doit être **bien structurée**, **commentée** et **testée**. Une modification qui ne respecte pas ces trois règles n'est pas terminée.
 
+**Posture : développeur Rust senior et architecte logiciel.** Chaque modification applique les bonnes pratiques reconnues de Rust ([Rust API Guidelines](https://rust-lang.github.io/api-guidelines/), idiomes de la communauté, recommandations de clippy) et les principes d'architecture de ce fichier. Compiler ne suffit pas : le code doit être celui qu'un relecteur Rust expérimenté accepterait sans retouche. Entre une habitude venue d'un autre langage et l'idiome Rust, l'idiome l'emporte. Les règles concrètes sont dans « Bonnes pratiques Rust » ci-dessous.
+
 **Structure et design patterns :**
 - **Une responsabilité par module**, et des dépendances qui vont dans un seul sens. État actuel, à préserver :
 
@@ -48,6 +50,18 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
 - **Pas d'état global** (ni `static mut`, ni singleton) : l'état partagé passe explicitement en `Arc`, avec des atomiques pour les compteurs et un `Mutex` court pour le reste.
 - **Fonctions courtes**, qui font une seule chose et dont le nom le dit ; découper dès qu'une fonction mélange décision et I/O, ou dépasse un écran.
 - **Patterns au service de la simplicité** : un pattern se justifie par un besoin réel (plusieurs implémentations, découplage, testabilité). Pas d'abstraction pour une seule implémentation sans besoin prévisible, pas de couche « au cas où ». Préférer les idiomes Rust (traits, enums + `match`, itérateurs, `?`) aux patterns orientés objet transposés tels quels (pas d'émulation d'héritage, pas d'accesseurs inutiles).
+
+**Bonnes pratiques Rust (obligatoire) :**
+- **Erreurs** : `Result` et `?` partout, avec `anyhow::Context` pour dire ce qui échouait, en français. Pas d'`unwrap()` ni d'`expect()` hors des tests, sauf invariant garanti et commenté sur place (les CIDR constants de `config.rs`, le `expect("vérifié ci-dessus")` de `Baseline::decide`). Jamais de `panic!`, d'indexation non vérifiée ni de dépassement arithmétique possible sur une donnée venant du réseau, des logs ou d'un fichier.
+- **Possession et emprunts** : emprunter (`&str`, `&[T]`, `&T`) plutôt que cloner ou posséder sans besoin. Un `clone()` ou une allocation sur le chemin critique se justifie par un commentaire. La généricité (`impl IntoIterator`, `impl AsRef<str>`) sert à simplifier l'appelant, jamais par principe.
+- **Types** : rendre les états invalides impossibles à représenter (enums, `Option` plutôt que valeurs sentinelles, types dédiés plutôt que tuples anonymes qui circulent entre modules). Dériver les traits standard utiles (`Debug`, `Clone`, `PartialEq`…), implémenter `Default` et `From` plutôt que des constructeurs ad hoc quand ils conviennent.
+- **Visibilité minimale** : `pub` seulement pour ce qu'un autre module utilise, sinon `pub(crate)`, `pub(super)` ou privé. Un module expose une petite interface et cache le reste.
+- **Pas de `unsafe`** : le projet n'en contient aucun. Une exception demanderait un besoin mesuré, un commentaire `// SAFETY:` et l'accord explicite de l'utilisateur.
+- **Concurrence** : aucun verrou tenu à travers un `.await`, ni pendant une I/O ou un calcul long. Une I/O bloquante ou un calcul coûteux passe par `spawn_blocking` ou un thread dédié. Les canaux sont bornés.
+- **Performance** : itérateurs plutôt que boucles indexées, pas d'allocation dans le cas courant du chemin critique, collections dimensionnées quand la taille est connue. On mesure (rejeu en `--release`) avant d'optimiser ce qui n'est pas évident, et la lisibilité n'est sacrifiée qu'à un gain mesuré.
+- **Nommage** : conventions Rust (`snake_case`, `CamelCase`, `SCREAMING_SNAKE_CASE` ; conversions `as_`, `to_`, `into_` ; pas de préfixe `get_` sur un accesseur, les handlers HTTP `get_*` de `web.rs` nommant la méthode GET), noms en anglais pour le code, commentaires et textes en français.
+- **Format** : le code n'est **pas** formaté par rustfmt (lignes longues assumées). Ne jamais lancer `cargo fmt` sur le projet, ce qui reformaterait des centaines de blocs : suivre le style des fichiers voisins.
+- **Dépendances** : peu nombreuses, maintenues et en pur Rust (`cargo build` sans libpcap ni OpenSSL). Une nouvelle crate se justifie par un besoin que la bibliothèque standard ou une dépendance existante ne couvre pas.
 
 **Documentation dans `docs/`, toujours à jour (obligatoire)** : toute la documentation du projet s'écrit dans `docs/`, un fichier par sujet, référencé dans l'index [docs/README.md](docs/README.md). Le README racine reste court : présentation, fonctionnalités, lancement avec Docker, lien vers `docs/`, licence. Une nouvelle documentation va dans `docs/` (fichier existant ou nouveau fichier ajouté à l'index), jamais dans le README ; une fonctionnalité visible pour l'utilisateur s'ajoute aussi en une ligne à la liste « Fonctionnalités » du README. Les renvois entre documents sont des liens Markdown relatifs (`[configuration](configuration.md#notify)`), pas des numéros de section.
 

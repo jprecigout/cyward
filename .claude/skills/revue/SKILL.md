@@ -19,13 +19,20 @@ Lire chaque fichier modifié **en entier**, ainsi que les appelants des fonction
 ### Structure et conception (voir CLAUDE.md, « Structure et design patterns »)
 - Chaque module garde une seule responsabilité. Le sens des dépendances correspond au tableau de CLAUDE.md : les producteurs d'alertes (`detect/`, `logs.rs`) n'importent jamais `llm` ni `web`, et inversement. Pour le contrôler :
   ```bash
-  for f in src/detect/*.rs src/logs.rs src/logs/*.rs src/llm.rs src/web.rs; do printf '%-22s ' $f; grep -v '^\s*//' $f | grep -oE '\b(alert|capture|config|stats|llm|web|logs|banner)::' | sort -u | tr '\n' ' '; echo; done
+  for f in src/detect.rs src/detect/*.rs src/logs.rs src/logs/*.rs src/llm.rs src/web.rs; do printf '%-22s ' $f; grep -v '^\s*//' $f | grep -oE '\b(alert|capture|config|stats|llm|web|logs|banner)::' | sort -u | tr '\n' ' '; echo; done
   ```
 - La logique de décision reste pure (sans I/O), donc testable ; les I/O restent en bordure.
 - Le changement réutilise les patterns en place (Strategy `Detector`, Builder `Alert`, façade `AlertSink`, Observer `broadcast`, pipeline par canaux, middleware, superviseur) plutôt qu'une mécanique parallèle.
 - Une nouvelle détection est une nouvelle implémentation enregistrée, pas une série de cas ajoutés dans du code existant.
 - Pas d'état global ni de singleton ; des enums plutôt que des chaînes ou des booléens magiques ; des fonctions courtes.
 - Signaler aussi l'excès inverse : une abstraction sans second usage, une couche « au cas où », un pattern objet transposé qui complique le code Rust.
+
+### Bonnes pratiques Rust (voir CLAUDE.md, « Bonnes pratiques Rust »)
+- Erreurs propagées par `?` ; aucun `unwrap()`, `expect()`, `panic!` ni indexation non vérifiée hors des tests, sauf invariant garanti et commenté sur place.
+- Emprunts plutôt que clones ; un `clone()` ou une allocation sur le chemin critique est justifié par un commentaire.
+- Types qui excluent les états invalides (enums, `Option`), traits standard dérivés, visibilité minimale (`pub(crate)`, `pub(super)`).
+- Aucun `unsafe` ; aucun verrou tenu à travers un `.await` ni pendant une I/O ; canaux bornés.
+- Conventions de nommage Rust. Pas de reformatage par `cargo fmt` : le diff ne doit contenir que des changements voulus.
 
 ### Justesse de la détection
 - Les détecteurs utilisent-ils uniquement le temps des paquets (`p.ts`, `now` de `tick`) ? Un `SystemTime::now()` dans `src/detect/` casse le rejeu.
