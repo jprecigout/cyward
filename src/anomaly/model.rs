@@ -89,11 +89,8 @@ impl Model {
         for s in samples {
             by_host.entry(s.host.as_str()).or_default().push(&s.features);
         }
-        let hosts = by_host
-            .into_iter()
-            .filter(|(_, v)| v.len() >= MIN_HOST_SAMPLES)
-            .map(|(h, v)| (h.to_string(), features::profile(&v)))
-            .collect();
+        let hosts =
+            by_host.into_iter().filter(|(_, v)| v.len() >= MIN_HOST_SAMPLES).map(|(h, v)| (h.to_string(), features::profile(&v))).collect();
 
         Self {
             version,

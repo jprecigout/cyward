@@ -127,7 +127,12 @@ mod tests {
 
     /// Réponse ARP : `ip` annonce être à `mac`.
     fn arp(ts: f64, ip: &str, mac: [u8; 6]) -> PacketMeta {
-        PacketMeta { proto: Proto::Arp, dport: 0, arp: Some(ArpInfo { op: ArpOp::Reply, sender_mac: mac }), ..syn(ts, ip, "192.168.1.20", 0) }
+        PacketMeta {
+            proto: Proto::Arp,
+            dport: 0,
+            arp: Some(ArpInfo { op: ArpOp::Reply, sender_mac: mac }),
+            ..syn(ts, ip, "192.168.1.20", 0)
+        }
     }
 
     fn detector() -> ArpSpoofing {

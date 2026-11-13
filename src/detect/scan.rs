@@ -61,7 +61,13 @@ impl PortScan {
 /// l'alerte est déjà émise : mémoriser davantage ne sert à rien). Un ensemble nouveau n'est
 /// créé que si `room` (budget mémoire disponible). Renvoie la taille de l'ensemble si `item`
 /// était nouveau.
-fn insert_capped<K: std::hash::Hash + Eq, V: std::hash::Hash + Eq>(map: &mut HashMap<K, HashSet<V>>, key: K, item: V, threshold: usize, room: bool) -> Option<usize> {
+fn insert_capped<K: std::hash::Hash + Eq, V: std::hash::Hash + Eq>(
+    map: &mut HashMap<K, HashSet<V>>,
+    key: K,
+    item: V,
+    threshold: usize,
+    room: bool,
+) -> Option<usize> {
     let set = match map.get_mut(&key) {
         Some(s) => s,
         None if room => map.entry(key).or_default(),
@@ -114,15 +120,20 @@ impl Detector for PortScan {
             let mut sample: Vec<_> = st.ports_by_host[&p.dst].iter().copied().collect();
             sample.sort_unstable();
             out.push(
-                Alert::new(AlertKind::PortScan, severity, AlertSource::Network, ts_to_dt(p.ts), format!("Scan de ports de {} vers {}", p.src, p.dst))
-                    .description(format!(
-                        "{} ports distincts sondés en moins de {} s depuis {origin}.",
-                        self.cfg.ports_threshold,
-                        self.cfg.window_secs
-                    ))
-                    .src(p.src)
-                    .dst(p.dst)
-                    .evidence(json!({ "ports": sample, "window_secs": self.cfg.window_secs })),
+                Alert::new(
+                    AlertKind::PortScan,
+                    severity,
+                    AlertSource::Network,
+                    ts_to_dt(p.ts),
+                    format!("Scan de ports de {} vers {}", p.src, p.dst),
+                )
+                .description(format!(
+                    "{} ports distincts sondés en moins de {} s depuis {origin}.",
+                    self.cfg.ports_threshold, self.cfg.window_secs
+                ))
+                .src(p.src)
+                .dst(p.dst)
+                .evidence(json!({ "ports": sample, "window_secs": self.cfg.window_secs })),
             );
         }
 
@@ -130,17 +141,21 @@ impl Detector for PortScan {
         if new_host == Some(self.cfg.hosts_threshold) {
             let sample: Vec<_> = st.hosts_by_port[&p.dport].iter().take(30).map(|h| h.to_string()).collect();
             out.push(
-                Alert::new(AlertKind::HostSweep, severity, AlertSource::Network, ts_to_dt(p.ts), format!("Balayage du port {} par {}", p.dport, p.src))
-                    .description(format!(
-                        "{} hôtes distincts contactés sur le port {} en moins de {} s depuis {origin}.",
-                        self.cfg.hosts_threshold,
-                        p.dport,
-                        self.cfg.window_secs
-                    ))
-                    .src(p.src)
-                    // Pas de cible unique : l'empreinte regroupe par source et par port.
-                    .fingerprint(format!("sweep|{}|{}", p.src, p.dport))
-                    .evidence(json!({ "port": p.dport, "hosts": sample })),
+                Alert::new(
+                    AlertKind::HostSweep,
+                    severity,
+                    AlertSource::Network,
+                    ts_to_dt(p.ts),
+                    format!("Balayage du port {} par {}", p.dport, p.src),
+                )
+                .description(format!(
+                    "{} hôtes distincts contactés sur le port {} en moins de {} s depuis {origin}.",
+                    self.cfg.hosts_threshold, p.dport, self.cfg.window_secs
+                ))
+                .src(p.src)
+                // Pas de cible unique : l'empreinte regroupe par source et par port.
+                .fingerprint(format!("sweep|{}|{}", p.src, p.dport))
+                .evidence(json!({ "port": p.dport, "hosts": sample })),
             );
         }
     }
@@ -197,17 +212,23 @@ impl Detector for BruteForce {
         *count += 1;
         if *count == self.cfg.threshold {
             out.push(
-                Alert::new(AlertKind::BruteForce, Severity::High, AlertSource::Network, ts_to_dt(p.ts), format!("Force brute probable sur {}:{} depuis {}", p.dst, p.dport, p.src))
-                    .description(format!(
-                        "{} connexions TCP vers le port {} ({}) en moins de {} s.",
-                        count,
-                        p.dport,
-                        service_name(p.dport),
-                        self.cfg.window_secs
-                    ))
-                    .src(p.src)
-                    .dst(format!("{}:{}", p.dst, p.dport))
-                    .evidence(json!({ "connections": count, "port": p.dport, "service": service_name(p.dport) })),
+                Alert::new(
+                    AlertKind::BruteForce,
+                    Severity::High,
+                    AlertSource::Network,
+                    ts_to_dt(p.ts),
+                    format!("Force brute probable sur {}:{} depuis {}", p.dst, p.dport, p.src),
+                )
+                .description(format!(
+                    "{} connexions TCP vers le port {} ({}) en moins de {} s.",
+                    count,
+                    p.dport,
+                    service_name(p.dport),
+                    self.cfg.window_secs
+                ))
+                .src(p.src)
+                .dst(format!("{}:{}", p.dst, p.dport))
+                .evidence(json!({ "connections": count, "port": p.dport, "service": service_name(p.dport) })),
             );
         }
     }
@@ -257,16 +278,22 @@ impl Detector for SynFlood {
         if st.count == self.cfg.threshold {
             let distributed = st.sources.len() > 50;
             out.push(
-                Alert::new(AlertKind::SynFlood, Severity::High, AlertSource::Network, ts_to_dt(p.ts), format!("Inondation SYN vers {}", p.dst))
-                    .description(format!(
-                        "{} demandes de connexion en {} s depuis {} sources{}.",
-                        st.count,
-                        self.cfg.window_secs,
-                        st.sources.len(),
-                        if distributed { " (attaque distribuée ou adresses usurpées)" } else { "" }
-                    ))
-                    .dst(p.dst)
-                    .evidence(json!({ "syn": st.count, "distinct_sources": st.sources.len() })),
+                Alert::new(
+                    AlertKind::SynFlood,
+                    Severity::High,
+                    AlertSource::Network,
+                    ts_to_dt(p.ts),
+                    format!("Inondation SYN vers {}", p.dst),
+                )
+                .description(format!(
+                    "{} demandes de connexion en {} s depuis {} sources{}.",
+                    st.count,
+                    self.cfg.window_secs,
+                    st.sources.len(),
+                    if distributed { " (attaque distribuée ou adresses usurpées)" } else { "" }
+                ))
+                .dst(p.dst)
+                .evidence(json!({ "syn": st.count, "distinct_sources": st.sources.len() })),
             );
         }
     }
@@ -379,7 +406,10 @@ mod tests {
             d.on_packet(&syn(f64::from(port) * 0.001, "192.168.1.50", "192.168.1.1", port), &mut out);
         }
         assert_eq!(out.len(), 1);
-        assert_eq!(d.sources[&"192.168.1.50".parse::<IpAddr>().unwrap()].ports_by_host.values().next().unwrap().len(), PortScanConfig::default().ports_threshold);
+        assert_eq!(
+            d.sources[&"192.168.1.50".parse::<IpAddr>().unwrap()].ports_by_host.values().next().unwrap().len(),
+            PortScanConfig::default().ports_threshold
+        );
     }
 
     // Au-delà du plafond, aucun nouveau triplet n'est créé, mais la force brute déjà suivie

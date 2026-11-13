@@ -90,7 +90,8 @@ impl Gen {
 
     /// Réponse ARP non sollicitée (ARP gratuit) diffusée par `mac` : « `ip` est à moi ».
     fn arp_reply(&mut self, ts: f64, ip: [u8; 4], mac: [u8; 6]) {
-        let arp = ArpEthIpv4Packet { operation: ArpOperation::REPLY, sender_mac: mac, sender_ipv4: ip, target_mac: [0xff; 6], target_ipv4: ip };
+        let arp =
+            ArpEthIpv4Packet { operation: ArpOperation::REPLY, sender_mac: mac, sender_ipv4: ip, target_mac: [0xff; 6], target_ipv4: ip };
         let mut buf = Vec::new();
         PacketBuilder::ethernet2(mac, [0xff; 6]).arp(arp.to_arp_packet()).write(&mut buf).unwrap();
         self.write(ts, buf);

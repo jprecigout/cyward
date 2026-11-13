@@ -34,7 +34,9 @@ pub fn from_config(channels: &[ChannelConfig]) -> Vec<Box<dyn Notifier>> {
         .iter()
         .map(|c| -> Box<dyn Notifier> {
             match c {
-                ChannelConfig::Ntfy { url, topic, token } => Box::new(Ntfy { url: url.clone(), topic: topic.clone(), token: token.clone() }),
+                ChannelConfig::Ntfy { url, topic, token } => {
+                    Box::new(Ntfy { url: url.clone(), topic: topic.clone(), token: token.clone() })
+                }
                 ChannelConfig::Webhook { url, headers } => Box::new(Webhook { url: url.clone(), headers: headers.clone() }),
             }
         })
@@ -141,7 +143,9 @@ mod tests {
     // ntfy : JSON sur la racine du serveur, sujet, priorité, lien et jeton.
     #[test]
     fn ntfy_request() {
-        let c = &from_config(&[ChannelConfig::Ntfy { url: "http://127.0.0.1:8090/".into(), topic: "cyward".into(), token: "tk_abc".into() }])[0];
+        let c =
+            &from_config(&[ChannelConfig::Ntfy { url: "http://127.0.0.1:8090/".into(), topic: "cyward".into(), token: "tk_abc".into() }])
+                [0];
         let (r, v) = body(c.request(&Client::new(), &sample()));
         assert_eq!(r.url().as_str(), "http://127.0.0.1:8090/");
         assert_eq!(r.headers()["authorization"], "Bearer tk_abc");

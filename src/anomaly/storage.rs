@@ -67,11 +67,7 @@ impl Storage {
         }
         let raw = fs::read_to_string(&path).with_context(|| format!("lecture de {}", path.display()))?;
         let mut bad = 0;
-        let items = raw
-            .lines()
-            .filter(|l| !l.is_empty())
-            .filter_map(|l| serde_json::from_str(l).map_err(|_| bad += 1).ok())
-            .collect();
+        let items = raw.lines().filter(|l| !l.is_empty()).filter_map(|l| serde_json::from_str(l).map_err(|_| bad += 1).ok()).collect();
         if bad > 0 {
             tracing::warn!("{bad} ligne(s) illisible(s) ignorée(s) dans {}", path.display());
         }
@@ -90,7 +86,8 @@ impl Storage {
     /// Remplace tout le journal des échantillons (compaction), de façon atomique.
     pub fn rewrite_samples<T: Serialize>(&self, items: &[T]) -> Result<()> {
         let tmp = self.dir.join("samples.jsonl.tmp");
-        write_lines(fs::File::create(&tmp).with_context(|| format!("création de {}", tmp.display()))?, items).with_context(|| format!("écriture de {}", tmp.display()))?;
+        write_lines(fs::File::create(&tmp).with_context(|| format!("création de {}", tmp.display()))?, items)
+            .with_context(|| format!("écriture de {}", tmp.display()))?;
         fs::rename(&tmp, self.dir.join("samples.jsonl")).context("remplacement de samples.jsonl")
     }
 

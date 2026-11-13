@@ -75,16 +75,22 @@ impl Volume {
                 let z = (x - b.mean) / std;
                 if z >= self.cfg.zscore {
                     out.push(
-                        Alert::new(AlertKind::VolumeAnomaly, Severity::High, AlertSource::Network, ts_to_dt(end), format!("Volume sortant anormal depuis {host}"))
-                            .description(format!(
-                                "{} envoyés vers l'extérieur en {} s, contre {} habituellement (z = {:.1}). Possible exfiltration de données.",
-                                human_bytes(x),
-                                self.cfg.bucket_secs,
-                                human_bytes(b.mean),
-                                z
-                            ))
-                            .src(host)
-                            .evidence(json!({ "bytes": x as u64, "baseline_bytes": b.mean as u64, "zscore": z })),
+                        Alert::new(
+                            AlertKind::VolumeAnomaly,
+                            Severity::High,
+                            AlertSource::Network,
+                            ts_to_dt(end),
+                            format!("Volume sortant anormal depuis {host}"),
+                        )
+                        .description(format!(
+                            "{} envoyés vers l'extérieur en {} s, contre {} habituellement (z = {:.1}). Possible exfiltration de données.",
+                            human_bytes(x),
+                            self.cfg.bucket_secs,
+                            human_bytes(b.mean),
+                            z
+                        ))
+                        .src(host)
+                        .evidence(json!({ "bytes": x as u64, "baseline_bytes": b.mean as u64, "zscore": z })),
                     );
                 }
             }

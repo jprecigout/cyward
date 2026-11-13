@@ -268,7 +268,8 @@ fn read_name(buf: &[u8], mut pos: usize) -> Option<(String, usize)> {
 /// Vrai pour un nom de machine plausible : segments de 1 à 63 caractères ASCII alphanumériques,
 /// « - » ou « _ ». Le nom vient du réseau : tout le reste est refusé plutôt qu'affiché.
 fn is_hostname(name: &str) -> bool {
-    !name.is_empty() && name.split('.').all(|l| (1..=63).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+    !name.is_empty()
+        && name.split('.').all(|l| (1..=63).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
 }
 
 /// Premier serveur `nameserver` d'un fichier au format de `/etc/resolv.conf`. Les adresses

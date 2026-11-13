@@ -6,11 +6,7 @@
 //! jugées par le modèle actif. Une anomalie lève une alerte `host_anomaly` qui demande à
 //! l'utilisateur si la situation est normale.
 
-use std::{
-    collections::HashMap,
-    net::IpAddr,
-    sync::Arc,
-};
+use std::{collections::HashMap, net::IpAddr, sync::Arc};
 
 use chrono::{DateTime, Local, Timelike};
 use serde_json::json;
@@ -115,7 +111,10 @@ impl Detector for HostAnomaly {
                 c.dns_entropy_sum += shannon_entropy(q.split('.').max_by_key(|l| l.len()).unwrap_or(""));
             }
         }
-        if dst_local && p.dst != p.src && let Some(c) = self.counters(p.dst) {
+        if dst_local
+            && p.dst != p.src
+            && let Some(c) = self.counters(p.dst)
+        {
             c.bytes_in += u64::from(p.len);
         }
     }
@@ -171,14 +170,16 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
-    use crate::{
-        anomaly::model::Sample,
-        config::AnomalyConfig,
-        detect::testutil::syn,
-    };
+    use crate::{anomaly::model::Sample, config::AnomalyConfig, detect::testutil::syn};
 
     fn baseline(mode: AnomalyMode) -> Arc<Baseline> {
-        Arc::new(Baseline::in_memory(AnomalyConfig { enabled: true, mode, window_secs: 60.0, min_training_samples: 50, ..Default::default() }))
+        Arc::new(Baseline::in_memory(AnomalyConfig {
+            enabled: true,
+            mode,
+            window_secs: 60.0,
+            min_training_samples: 50,
+            ..Default::default()
+        }))
     }
 
     /// Simule `minutes` minutes de trafic régulier : quelques connexions HTTPS par minute.

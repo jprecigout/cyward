@@ -313,7 +313,8 @@ pub fn pace_delay(offset: f64, elapsed: f64, speed: f64) -> Option<std::time::Du
 /// vitesse, ou au rythme de la capture accéléré `speed` fois (pour suivre la vue des flux).
 pub async fn replay(path: &Path, tx: mpsc::Sender<PacketMeta>, stats: Arc<Stats>, speed: Option<f64>) -> Result<()> {
     let file = std::fs::File::open(path).with_context(|| format!("ouverture de {}", path.display()))?;
-    let mut reader = PcapReader::new(std::io::BufReader::new(file)).context("fichier pcap invalide (pcapng non supporté : convertir avec `editcap -F pcap`)")?;
+    let mut reader = PcapReader::new(std::io::BufReader::new(file))
+        .context("fichier pcap invalide (pcapng non supporté : convertir avec `editcap -F pcap`)")?;
     // Le type de lien est déclaré une fois dans l'en-tête global du fichier.
     let link = match reader.header().datalink {
         DataLink::ETHERNET => LinkType::Ethernet,
@@ -387,10 +388,8 @@ mod tests {
 
     #[test]
     fn parses_tcp_syn_over_ethernet() {
-        let builder = etherparse::PacketBuilder::ethernet2([1; 6], [2; 6])
-            .ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64)
-            .tcp(40000, 22, 1, 1024)
-            .syn();
+        let builder =
+            etherparse::PacketBuilder::ethernet2([1; 6], [2; 6]).ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64).tcp(40000, 22, 1, 1024).syn();
         let mut buf = Vec::new();
         builder.write(&mut buf, &[]).unwrap();
         let m = parse_packet(&buf, LinkType::Ethernet, 1.0).unwrap();
@@ -422,7 +421,11 @@ mod tests {
     #[test]
     fn ip_packet_has_no_arp_info() {
         let mut buf = Vec::new();
-        etherparse::PacketBuilder::ethernet2([1; 6], [2; 6]).ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64).udp(1000, 2000).write(&mut buf, &[]).unwrap();
+        etherparse::PacketBuilder::ethernet2([1; 6], [2; 6])
+            .ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64)
+            .udp(1000, 2000)
+            .write(&mut buf, &[])
+            .unwrap();
         assert!(parse_packet(&buf, LinkType::Ethernet, 1.0).unwrap().arp.is_none());
     }
 }

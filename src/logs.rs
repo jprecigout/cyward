@@ -48,7 +48,12 @@ pub async fn run(cfg: LogsConfig, auth: AuthConfig, custom: Vec<CustomLogRule>, 
     if cfg.journald {
         let tx = tx.clone();
         // `-n 0` : seulement les nouvelles lignes ; `-o json` : champs structurés, sans ambiguïté de format.
-        tokio::spawn(supervise("journalctl", vec!["-f".into(), "-n".into(), "0".into(), "-o".into(), "json".into()], tx, parse_journal_json));
+        tokio::spawn(supervise(
+            "journalctl",
+            vec!["-f".into(), "-n".into(), "0".into(), "-o".into(), "json".into()],
+            tx,
+            parse_journal_json,
+        ));
     }
     for path in cfg.files {
         let tx = tx.clone();
@@ -124,7 +129,9 @@ fn parse_journal_json(raw: &str) -> Option<LogLine> {
     let message = match &v["MESSAGE"] {
         serde_json::Value::String(s) => s.clone(),
         // journald encode en tableau d'octets les messages non UTF-8
-        serde_json::Value::Array(bytes) => String::from_utf8_lossy(&bytes.iter().filter_map(|b| b.as_u64().map(|b| b as u8)).collect::<Vec<_>>()).into_owned(),
+        serde_json::Value::Array(bytes) => {
+            String::from_utf8_lossy(&bytes.iter().filter_map(|b| b.as_u64().map(|b| b as u8)).collect::<Vec<_>>()).into_owned()
+        }
         _ => return None,
     };
     let ident = v["SYSLOG_IDENTIFIER"].as_str().or(v["_COMM"].as_str()).unwrap_or("").to_string();
@@ -141,7 +148,11 @@ fn parse_journal_json(raw: &str) -> Option<LogLine> {
 fn parse_plain(raw: &str) -> Option<LogLine> {
     // Format syslog classique « date hôte programme[pid]: message » : on garde la ligne entière,
     // les règles ne sont pas ancrées.
-    let ident = raw.split_whitespace().find(|w| w.ends_with(':')).map(|w| w.trim_end_matches(':').split('[').next().unwrap_or("").to_string()).unwrap_or_default();
+    let ident = raw
+        .split_whitespace()
+        .find(|w| w.ends_with(':'))
+        .map(|w| w.trim_end_matches(':').split('[').next().unwrap_or("").to_string())
+        .unwrap_or_default();
     Some(LogLine { ts: Utc::now(), ident, message: raw.to_string() })
 }
 

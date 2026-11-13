@@ -113,7 +113,10 @@ impl Triage {
             .await?;
         // Ollama peut suffixer le nom par « :latest » ; on accepte les deux formes.
         let found = resp["data"].as_array().is_some_and(|models| {
-            models.iter().filter_map(|m| m["id"].as_str()).any(|id| id == self.cfg.model || id.trim_end_matches(":latest") == self.cfg.model)
+            models
+                .iter()
+                .filter_map(|m| m["id"].as_str())
+                .any(|id| id == self.cfg.model || id.trim_end_matches(":latest") == self.cfg.model)
         });
         if !found {
             bail!("modèle {} absent du serveur (avec Ollama : `ollama pull {}`)", self.cfg.model, self.cfg.model);
@@ -165,13 +168,8 @@ impl Triage {
                 { "role": "user", "content": user_prompt(alert, &self.related(alert)) },
             ],
         });
-        let resp: Value = self
-            .request(self.client.post(self.url("chat/completions")).json(&body))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let resp: Value =
+            self.request(self.client.post(self.url("chat/completions")).json(&body)).send().await?.error_for_status()?.json().await?;
         // Format OpenAI : le texte généré est dans choices[0].message.content.
         let content = resp["choices"][0]["message"]["content"].as_str().ok_or_else(|| anyhow!("réponse sans contenu : {resp}"))?;
         let mut analysis = parse_analysis(content)?;
@@ -236,7 +234,14 @@ cite le motif le plus probable au début de summary, en précisant qu'il s'agit 
         s.push_str("\nAlertes récentes impliquant les mêmes adresses :\n");
         // Une ligne résumée par alerte liée, pour ne pas gonfler le prompt.
         for r in related {
-            s.push_str(&format!("- [{}] {:?} {:?} : {} (x{})\n", r.first_seen.format("%Y-%m-%d %H:%M:%S"), r.severity, r.kind, r.title, r.count));
+            s.push_str(&format!(
+                "- [{}] {:?} {:?} : {} (x{})\n",
+                r.first_seen.format("%Y-%m-%d %H:%M:%S"),
+                r.severity,
+                r.kind,
+                r.title,
+                r.count
+            ));
         }
     }
     s

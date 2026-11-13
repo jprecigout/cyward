@@ -53,7 +53,10 @@ impl LogAnalyzer {
             // Création de compte (useradd) : moyen classique de persistance.
             Box::new(Pattern::new(r"new user: name=(?P<user>[^,\s]+)", account_created)?),
             // Ajout à un groupe donnant des droits d'administration (usermod/gpasswd).
-            Box::new(Pattern::new(r"add '(?P<user>[^']+)' to (?:shadow )?group '(?P<group>sudo|wheel|admin|root|docker|lxd)'", privileged_group)?),
+            Box::new(Pattern::new(
+                r"add '(?P<user>[^']+)' to (?:shadow )?group '(?P<group>sudo|wheel|admin|root|docker|lxd)'",
+                privileged_group,
+            )?),
             // Le noyau signale lui-même une inondation SYN.
             Box::new(Pattern::new(r"Possible SYN flooding on port (?P<port>\d+)", kernel_syn_flood)?),
         ];
@@ -109,16 +112,28 @@ fn account_created(c: &Captures, line: &LogLine) -> Alert {
 }
 
 fn privileged_group(c: &Captures, line: &LogLine) -> Alert {
-    Alert::new(AlertKind::PrivilegeEscalation, Severity::High, AlertSource::Logs, line.ts, format!("{} ajouté au groupe privilégié {}", &c["user"], &c["group"]))
-        .description("Un compte a reçu des droits d'administration.")
-        .dst(&c["user"])
-        .evidence(evidence(line))
+    Alert::new(
+        AlertKind::PrivilegeEscalation,
+        Severity::High,
+        AlertSource::Logs,
+        line.ts,
+        format!("{} ajouté au groupe privilégié {}", &c["user"], &c["group"]),
+    )
+    .description("Un compte a reçu des droits d'administration.")
+    .dst(&c["user"])
+    .evidence(evidence(line))
 }
 
 fn kernel_syn_flood(c: &Captures, line: &LogLine) -> Alert {
-    Alert::new(AlertKind::SynFlood, Severity::Medium, AlertSource::Logs, line.ts, format!("Le noyau signale une inondation SYN sur le port {}", &c["port"]))
-        .dst(format!("port {}", &c["port"]))
-        .evidence(evidence(line))
+    Alert::new(
+        AlertKind::SynFlood,
+        Severity::Medium,
+        AlertSource::Logs,
+        line.ts,
+        format!("Le noyau signale une inondation SYN sur le port {}", &c["port"]),
+    )
+    .dst(format!("port {}", &c["port"]))
+    .evidence(evidence(line))
 }
 
 /// Historique des échecs d'authentification d'une adresse IP.
@@ -145,7 +160,9 @@ impl SshAuth {
     fn new(cfg: AuthConfig) -> Result<Self> {
         Ok(Self {
             cfg,
-            failed: Regex::new(&format!(r"Failed (?:password|publickey|keyboard-interactive/pam) for (?:invalid user )?(?P<user>\S+) from {IP}"))?,
+            failed: Regex::new(&format!(
+                r"Failed (?:password|publickey|keyboard-interactive/pam) for (?:invalid user )?(?P<user>\S+) from {IP}"
+            ))?,
             invalid: Regex::new(&format!(r"Invalid user (?P<user>\S*) from {IP}"))?,
             accepted: Regex::new(&format!(r"Accepted (?P<method>\S+) for (?P<user>\S+) from {IP}"))?,
             failures: HashMap::new(),
@@ -248,17 +265,29 @@ impl LogRule for Sudo {
     fn check(&mut self, line: &LogLine, out: &mut Vec<Alert>) {
         if let Some(c) = self.denied.captures(&line.message) {
             out.push(
-                Alert::new(AlertKind::PrivilegeEscalation, Severity::High, AlertSource::Logs, line.ts, format!("Tentative sudo non autorisée par {}", &c["user"]))
-                    .description("Un utilisateur sans droits sudo a tenté d'exécuter une commande privilégiée.")
-                    .src(&c["user"])
-                    .evidence(evidence(line)),
+                Alert::new(
+                    AlertKind::PrivilegeEscalation,
+                    Severity::High,
+                    AlertSource::Logs,
+                    line.ts,
+                    format!("Tentative sudo non autorisée par {}", &c["user"]),
+                )
+                .description("Un utilisateur sans droits sudo a tenté d'exécuter une commande privilégiée.")
+                .src(&c["user"])
+                .evidence(evidence(line)),
             );
         } else if let Some(c) = self.fail.captures(&line.message) {
             out.push(
-                Alert::new(AlertKind::PrivilegeEscalation, Severity::Medium, AlertSource::Logs, line.ts, format!("Échecs de mot de passe sudo pour {}", &c["user"]))
-                    .description(format!("{} tentative(s) de mot de passe incorrect(es) pour sudo.", &c["n"]))
-                    .src(&c["user"])
-                    .evidence(evidence(line)),
+                Alert::new(
+                    AlertKind::PrivilegeEscalation,
+                    Severity::Medium,
+                    AlertSource::Logs,
+                    line.ts,
+                    format!("Échecs de mot de passe sudo pour {}", &c["user"]),
+                )
+                .description(format!("{} tentative(s) de mot de passe incorrect(es) pour sudo.", &c["n"]))
+                .src(&c["user"])
+                .evidence(evidence(line)),
             );
         }
     }
@@ -324,7 +353,9 @@ mod tests {
     #[test]
     fn normal_login_is_quiet() {
         let mut a = LogAnalyzer::new(AuthConfig::default(), &[]).unwrap();
-        assert!(a.analyze(&line(Utc::now(), "Accepted publickey for jerome from 192.168.1.2 port 4242 ssh2: ED25519 SHA256:abc")).is_empty());
+        assert!(
+            a.analyze(&line(Utc::now(), "Accepted publickey for jerome from 192.168.1.2 port 4242 ssh2: ED25519 SHA256:abc")).is_empty()
+        );
     }
 
     // Refus sudo, création de compte et ajout à un groupe privilégié.
@@ -332,8 +363,15 @@ mod tests {
     fn sudo_and_accounts() {
         let mut a = LogAnalyzer::new(AuthConfig::default(), &[]).unwrap();
         let t = Utc::now();
-        assert_eq!(a.analyze(&line(t, "bob : user NOT in sudoers ; TTY=pts/1 ; PWD=/home/bob ; USER=root ; COMMAND=/bin/bash"))[0].severity, Severity::High);
-        assert_eq!(a.analyze(&line(t, "new user: name=backdoor, UID=1001, GID=1001, home=/home/backdoor, shell=/bin/bash, from=/dev/pts/0"))[0].kind, AlertKind::AccountChange);
+        assert_eq!(
+            a.analyze(&line(t, "bob : user NOT in sudoers ; TTY=pts/1 ; PWD=/home/bob ; USER=root ; COMMAND=/bin/bash"))[0].severity,
+            Severity::High
+        );
+        assert_eq!(
+            a.analyze(&line(t, "new user: name=backdoor, UID=1001, GID=1001, home=/home/backdoor, shell=/bin/bash, from=/dev/pts/0"))[0]
+                .kind,
+            AlertKind::AccountChange
+        );
         assert_eq!(a.analyze(&line(t, "add 'backdoor' to group 'sudo'"))[0].kind, AlertKind::PrivilegeEscalation);
     }
 
@@ -342,7 +380,10 @@ mod tests {
     fn single_pattern_rules() {
         let mut a = LogAnalyzer::new(AuthConfig::default(), &[]).unwrap();
         let t = Utc::now();
-        let su = a.analyze(&line(t, "pam_unix(su:auth): authentication failure; logname=bob uid=1000 euid=0 tty=/dev/pts/1 ruser=bob rhost=  user=root"));
+        let su = a.analyze(&line(
+            t,
+            "pam_unix(su:auth): authentication failure; logname=bob uid=1000 euid=0 tty=/dev/pts/1 ruser=bob rhost=  user=root",
+        ));
         assert_eq!((su.len(), su[0].src.as_deref()), (1, Some("bob")));
         let k = a.analyze(&line(t, "TCP: request_sock_TCP: Possible SYN flooding on port 80. Sending cookies."));
         assert_eq!((k[0].kind, k[0].dst.as_deref()), (AlertKind::SynFlood, Some("port 80")));
@@ -353,7 +394,11 @@ mod tests {
     fn ordinary_lines_are_quiet() {
         let mut a = LogAnalyzer::new(AuthConfig::default(), &[]).unwrap();
         let t = Utc::now();
-        for msg in ["Started Daily apt download activities.", "bob : TTY=pts/1 ; PWD=/home/bob ; USER=root ; COMMAND=/usr/bin/apt update", "pam_unix(sshd:session): session opened for user bob"] {
+        for msg in [
+            "Started Daily apt download activities.",
+            "bob : TTY=pts/1 ; PWD=/home/bob ; USER=root ; COMMAND=/usr/bin/apt update",
+            "pam_unix(sshd:session): session opened for user bob",
+        ] {
             assert!(a.analyze(&line(t, msg)).is_empty(), "{msg}");
         }
     }

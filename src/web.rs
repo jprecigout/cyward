@@ -67,7 +67,15 @@ struct AppState {
 }
 
 /// Démarre le serveur et ne rend la main qu'en cas d'erreur.
-pub async fn serve(listen: &str, token: String, sink: AlertSink, stats: Arc<Stats>, baseline: Option<Arc<Baseline>>, names: Arc<Resolver>, flows: FlowHub) -> Result<()> {
+pub async fn serve(
+    listen: &str,
+    token: String,
+    sink: AlertSink,
+    stats: Arc<Stats>,
+    baseline: Option<Arc<Baseline>>,
+    names: Arc<Resolver>,
+    flows: FlowHub,
+) -> Result<()> {
     let state = AppState { sink, stats, token: Arc::new(token), baseline, names, flows };
     // Routes d'écriture : un second middleware, appliqué à elles seules, exige le jeton en en-tête.
     let writes = Router::new()
@@ -122,7 +130,10 @@ async fn write_guard(State(s): State<AppState>, req: Request, next: Next) -> Res
 /// pas poser cet en-tête sans l'accord du navigateur.
 fn write_allowed(token: &str, header: Option<&str>) -> Result<(), (StatusCode, String)> {
     if token.is_empty() {
-        return Err((StatusCode::FORBIDDEN, "actions désactivées : définissez web.token dans la configuration pour pouvoir répondre et valider".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "actions désactivées : définissez web.token dans la configuration pour pouvoir répondre et valider".into(),
+        ));
     }
     match header {
         Some(t) if constant_time_eq(t.as_bytes(), token.as_bytes()) => Ok(()),
@@ -173,7 +184,8 @@ async fn get_stats(State(s): State<AppState>) -> impl IntoResponse {
 async fn events(State(s): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // `r.ok()` ignore les erreurs « Lagged » (client trop lent) : les événements manqués sont
     // simplement sautés, le client se resynchronise en rechargeant la liste.
-    let stream = BroadcastStream::new(s.sink.store.subscribe()).filter_map(|r| r.ok().and_then(|e| Event::default().json_data(e).ok()).map(Ok));
+    let stream =
+        BroadcastStream::new(s.sink.store.subscribe()).filter_map(|r| r.ok().and_then(|e| Event::default().json_data(e).ok()).map(Ok));
     // Le keep-alive envoie un commentaire périodique pour que les proxys ne coupent pas la connexion.
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
@@ -182,7 +194,8 @@ async fn events(State(s): State<AppState>) -> Sse<impl Stream<Item = Result<Even
 /// le dernier onglet le ferme, l'abonnement disparaît et le moteur cesse de compter.
 async fn flow_events(State(s): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // Comme pour /api/events, un onglet en retard saute simplement les secondes manquées.
-    let stream = BroadcastStream::new(s.flows.subscribe()).filter_map(|r| r.ok().and_then(|f| Event::default().json_data(&*f).ok()).map(Ok));
+    let stream =
+        BroadcastStream::new(s.flows.subscribe()).filter_map(|r| r.ok().and_then(|f| Event::default().json_data(&*f).ok()).map(Ok));
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -229,12 +242,15 @@ async fn feedback(State(s): State<AppState>, Path(id): Path<u64>, Json(body): Js
         return error(StatusCode::BAD_REQUEST, "seules les anomalies de comportement attendent une réponse");
     }
     let Some(host) = alert.evidence["host"].as_str() else { return error(StatusCode::BAD_REQUEST, "alerte sans machine") };
-    let ids: Vec<usize> = alert.evidence["feature_ids"].as_array().into_iter().flatten().filter_map(|v| v.as_u64().map(|v| v as usize)).collect();
+    let ids: Vec<usize> =
+        alert.evidence["feature_ids"].as_array().into_iter().flatten().filter_map(|v| v.as_u64().map(|v| v as usize)).collect();
     let (from, to) = (alert.first_seen.timestamp() as f64, alert.last_seen.timestamp() as f64);
     let now = Utc::now();
     match b.feedback(host, from, to, body.verdict, body.scope, body.reason.trim(), &ids, now) {
         Ok(n) => {
-            s.sink.store.update(id, |a| a.feedback = Some(Feedback { verdict: body.verdict, reason: body.reason.trim().to_string(), scope: body.scope, at: now }));
+            s.sink.store.update(id, |a| {
+                a.feedback = Some(Feedback { verdict: body.verdict, reason: body.reason.trim().to_string(), scope: body.scope, at: now })
+            });
             trainer::save(&b).await;
             Json(json!({ "updated_windows": n })).into_response()
         }

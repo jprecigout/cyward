@@ -26,8 +26,8 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-pub use self::status::{CandidateInfo, Learning, ModelInfo, SampleCounts, Status};
 use self::samples::{SampleEvent, Windows, covered_hours, enforce_retention, needs_compaction, replay};
+pub use self::status::{CandidateInfo, Learning, ModelInfo, SampleCounts, Status};
 use super::{
     diff::{self, Diff},
     features::{self, Explained, FeatureStat, Features, explain},
@@ -262,7 +262,9 @@ impl Baseline {
     /// configuré, sinon démarre en mémoire (tout est perdu à l'arrêt).
     pub fn open(cfg: AnomalyConfig) -> Result<Self> {
         if cfg.data_dir.is_empty() {
-            tracing::warn!("apprentissage du comportement normal en mémoire seulement (detection.anomaly.data_dir vide) : il sera perdu à l'arrêt");
+            tracing::warn!(
+                "apprentissage du comportement normal en mémoire seulement (detection.anomaly.data_dir vide) : il sera perdu à l'arrêt"
+            );
             return Ok(Self::in_memory(cfg));
         }
         let storage = Storage::open(std::path::Path::new(&cfg.data_dir))?;
@@ -348,7 +350,10 @@ impl Baseline {
                     if excepted {
                         (SampleStatus::Normal, WindowVerdict::Excepted)
                     } else {
-                        (SampleStatus::Flagged, WindowVerdict::Anomaly(AnomalyInfo { score, threshold: m.threshold, version: m.version, deviations }))
+                        (
+                            SampleStatus::Flagged,
+                            WindowVerdict::Anomaly(AnomalyInfo { score, threshold: m.threshold, version: m.version, deviations }),
+                        )
                     }
                 }
             }
@@ -362,7 +367,17 @@ impl Baseline {
     /// Applique la réponse de l'utilisateur aux fenêtres signalées de `host` commençant dans
     /// [`from`, `to`]. Renvoie le nombre de fenêtres mises à jour.
     #[allow(clippy::too_many_arguments)]
-    pub fn feedback(&self, host: &str, from: f64, to: f64, verdict: FeedbackVerdict, scope: FeedbackScope, reason: &str, feature_ids: &[usize], now: DateTime<Utc>) -> Result<usize> {
+    pub fn feedback(
+        &self,
+        host: &str,
+        from: f64,
+        to: f64,
+        verdict: FeedbackVerdict,
+        scope: FeedbackScope,
+        reason: &str,
+        feature_ids: &[usize],
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
         let mut guard = self.state.lock();
         // Accès direct aux champs : `samples` et `pending` sont modifiés dans la même boucle.
         let st = &mut *guard;
@@ -371,7 +386,11 @@ impl Baseline {
             FeedbackVerdict::Suspect => SampleStatus::Suspicious,
         };
         let mut n = 0;
-        for s in st.samples.iter_mut().filter(|s| s.host == host && s.status == SampleStatus::Flagged && s.start >= from - 0.5 && s.start <= to + 0.5) {
+        for s in st
+            .samples
+            .iter_mut()
+            .filter(|s| s.host == host && s.status == SampleStatus::Flagged && s.start >= from - 0.5 && s.start <= to + 0.5)
+        {
             s.status = status;
             st.pending.push(SampleEvent::Status { host: s.host.clone(), start: s.start, status });
             n += 1;
@@ -449,7 +468,14 @@ impl Baseline {
         }
         if st.active.is_some() && diff.is_empty() {
             self.activate(&mut st, model, now);
-            self.log(&mut st, now, "activation_auto", None, format!("modèle v{version} activé : aucun nouveau comportement à valider"), None);
+            self.log(
+                &mut st,
+                now,
+                "activation_auto",
+                None,
+                format!("modèle v{version} activé : aucun nouveau comportement à valider"),
+                None,
+            );
             return Ok(TrainOutcome::AutoActivated { version });
         }
         let outcome = TrainOutcome::PendingReview { version, hosts: diff.hosts.len(), drift_hosts: diff.drift_hosts() };
@@ -493,7 +519,12 @@ impl Baseline {
 
         for h in &cand.diff.hosts {
             let ok = accepted.contains(&h.host);
-            let detail = format!("modèle v{} : {} ({} fenêtre(s))", cand.model.version, if ok { "comportement accepté" } else { "comportement refusé" }, h.newly_accepted);
+            let detail = format!(
+                "modèle v{} : {} ({} fenêtre(s))",
+                cand.model.version,
+                if ok { "comportement accepté" } else { "comportement refusé" },
+                h.newly_accepted
+            );
             self.log(st, now, "validation", Some(&h.host), detail, None);
         }
         let outcome = |activated| Ok(DecisionOutcome { activated, rejected: rejected.to_vec() });
@@ -583,11 +614,7 @@ impl Baseline {
             if let Some(meta) = &work.meta {
                 storage.save_state(meta)?;
             }
-            if work.rewrite {
-                storage.rewrite_samples(&work.events)
-            } else {
-                storage.append_samples(&work.events)
-            }
+            if work.rewrite { storage.rewrite_samples(&work.events) } else { storage.append_samples(&work.events) }
         })();
         if written.is_err() {
             // Les modifications retirées de `pending` seraient perdues : tout réécrire la prochaine fois.

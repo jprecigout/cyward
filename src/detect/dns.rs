@@ -112,10 +112,14 @@ pub fn shannon_entropy(s: &str) -> f64 {
     }
     let n = s.len() as f64;
     // H = -Σ p·log2(p) sur les caractères présents.
-    counts.iter().filter(|&&c| c > 0).map(|&c| {
-        let p = c as f64 / n;
-        -p * p.log2()
-    }).sum()
+    counts
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / n;
+            -p * p.log2()
+        })
+        .sum()
 }
 
 #[cfg(test)]

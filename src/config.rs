@@ -36,8 +36,7 @@ impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         match path {
             Some(p) => {
-                let raw = std::fs::read_to_string(p)
-                    .with_context(|| format!("lecture de {}", p.display()))?;
+                let raw = std::fs::read_to_string(p).with_context(|| format!("lecture de {}", p.display()))?;
                 // Une clé inconnue ou un type erroné produit une erreur avec la ligne fautive.
                 toml::from_str(&raw).with_context(|| format!("format invalide dans {}", p.display()))
             }

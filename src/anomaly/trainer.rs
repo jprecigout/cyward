@@ -113,7 +113,8 @@ mod tests {
     use crate::anomaly::model::tests::sample;
 
     fn alert(kind: AlertKind, src: &str, dst: &str, from: i64, to: i64) -> Alert {
-        let mut a = Alert::new(kind, Severity::High, AlertSource::Network, DateTime::from_timestamp(from, 0).unwrap(), "t").src(src).dst(dst);
+        let mut a =
+            Alert::new(kind, Severity::High, AlertSource::Network, DateTime::from_timestamp(from, 0).unwrap(), "t").src(src).dst(dst);
         a.last_seen = DateTime::from_timestamp(to, 0).unwrap();
         a
     }

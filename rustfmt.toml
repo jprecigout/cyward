@@ -1,0 +1,10 @@
+# Formatage du code Rust : `cargo fmt` applique ces règles, `cargo fmt --check` les vérifie
+# (étape du script .claude/skills/verifier/check.sh). Seules des options stables de rustfmt.
+
+edition = "2024"
+# Lignes longues : le code enchaîne des builders d'alertes et des formats de message en français,
+# qui deviendraient illisibles coupés à 100 colonnes.
+max_width = 140
+# Une expression (appel, struct, chaîne de méthodes) reste sur une ligne tant qu'elle tient dans
+# max_width, au lieu des seuils plus courts que rustfmt applique par défaut.
+use_small_heuristics = "Max"

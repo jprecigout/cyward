@@ -56,9 +56,8 @@ pub fn render(info: &[(&str, String)], color: bool) -> String {
 
     // Texte placé à droite du bouclier, ligne par ligne : le nom sur les 6 premières lignes,
     // puis la description et la version sur les 2 dernières.
-    let mut right: Vec<String> = (0..6)
-        .map(|row| LETTERS.iter().zip(GRADIENT).map(|(letter, code)| paint(letter[row], code)).collect())
-        .collect();
+    let mut right: Vec<String> =
+        (0..6).map(|row| LETTERS.iter().zip(GRADIENT).map(|(letter, code)| paint(letter[row], code)).collect()).collect();
     right.push(paint("Détection d'intrusions · triage par IA locale", GREY));
     right.push(paint(&format!("v{}", env!("CARGO_PKG_VERSION")), GREY));
 

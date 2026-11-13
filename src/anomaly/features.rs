@@ -184,12 +184,15 @@ pub fn explain(x: &Features, profile: &[FeatureStat], own_profile: bool) -> Vec<
         .into_iter()
         .map(|d| {
             let usual = display(d.index, profile[d.index].median);
-            let reference = if own_profile { format!("habituellement {usual}") } else { format!("médiane du réseau {usual}, machine encore peu connue") };
+            let reference = if own_profile {
+                format!("habituellement {usual}")
+            } else {
+                format!("médiane du réseau {usual}, machine encore peu connue")
+            };
             Explained { index: d.index, z: d.z, value: display(d.index, x[d.index]), usual, reference }
         })
         .collect()
 }
-
 
 #[cfg(test)]
 mod tests {

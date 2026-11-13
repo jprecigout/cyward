@@ -436,7 +436,10 @@ fn throttled(n: usize, cfg: &NotifyConfig) -> Notification {
     Notification {
         reason: Reason::Throttled,
         title: "Cyward : notifications limitées".into(),
-        message: format!("{n} autre(s) alerte(s) n'ont pas été notifiées (plafond de {} par heure). Consultez le dashboard.", cfg.max_per_hour),
+        message: format!(
+            "{n} autre(s) alerte(s) n'ont pas été notifiées (plafond de {} par heure). Consultez le dashboard.",
+            cfg.max_per_hour
+        ),
         priority: 3,
         url: link(&cfg.dashboard_url, None),
         alert: None,
@@ -457,7 +460,9 @@ mod tests {
 
     /// Alerte d'identifiant `id` et de sévérité `severity`, sans verdict.
     fn alert(id: u64, severity: Severity) -> Alert {
-        let mut a = Alert::new(AlertKind::PortScan, severity, AlertSource::Network, Utc::now(), "Scan de ports").src("192.168.1.20").dst("192.168.1.10");
+        let mut a = Alert::new(AlertKind::PortScan, severity, AlertSource::Network, Utc::now(), "Scan de ports")
+            .src("192.168.1.20")
+            .dst("192.168.1.10");
         a.id = id;
         a
     }
@@ -486,7 +491,11 @@ mod tests {
         assert_eq!(n.reason, Reason::Verdict);
         assert_eq!(n.priority, 5);
         assert_eq!(n.title, "[Moyenne] Scan de ports");
-        assert!(n.message.contains("malveillant (90 %)") && n.message.contains("Source : 192.168.1.20") && n.message.contains("À faire : Isoler"));
+        assert!(
+            n.message.contains("malveillant (90 %)")
+                && n.message.contains("Source : 192.168.1.20")
+                && n.message.contains("À faire : Isoler")
+        );
         assert_eq!(n.url.as_deref(), Some("http://192.168.1.2:8080/#alerte-1"));
     }
 

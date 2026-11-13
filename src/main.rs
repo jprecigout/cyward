@@ -163,11 +163,8 @@ async fn main() -> Result<()> {
 /// source des paquets (interface ou fichier rejoué) ; `baseline` l'apprentissage du
 /// comportement normal, s'il est activé.
 fn banner_info(cfg: &Config, capture: String, baseline: Option<&Baseline>) -> Vec<(&'static str, String)> {
-    let dashboard = if cfg.web.token.is_empty() {
-        format!("http://{}", cfg.web.listen)
-    } else {
-        format!("http://{}/?token=…", cfg.web.listen)
-    };
+    let dashboard =
+        if cfg.web.token.is_empty() { format!("http://{}", cfg.web.listen) } else { format!("http://{}/?token=…", cfg.web.listen) };
     let logs = if cfg.logs.enabled {
         // Ex. « journald + 2 fichier(s) » ; « aucune source » si tout est vide dans la config.
         let mut sources = Vec::new();
@@ -202,7 +199,15 @@ fn banner_info(cfg: &Config, capture: String, baseline: Option<&Baseline>) -> Ve
     };
     // Ex. « 2 canal(aux) » ; les adresses ne sont pas affichées, car elles peuvent contenir un secret.
     let notifications = if cfg.notify.enabled { format!("{} canal(aux)", cfg.notify.channels.len()) } else { "désactivées".to_string() };
-    vec![("Dashboard", dashboard), ("Capture", capture), ("Logs", logs), ("Modèle IA", model), ("Normalité", normality), ("Historique", history), ("Notifications", notifications)]
+    vec![
+        ("Dashboard", dashboard),
+        ("Capture", capture),
+        ("Logs", logs),
+        ("Modèle IA", model),
+        ("Normalité", normality),
+        ("Historique", history),
+        ("Notifications", notifications),
+    ]
 }
 
 /// Ouvre l'apprentissage du comportement normal s'il est activé (et recharge son état disque).
@@ -230,7 +235,8 @@ fn start_pipeline(cfg: &Config, stats: &Arc<Stats>, baseline: Option<Arc<Baselin
     *stats.started_at.lock() = Some(chrono::Utc::now());
     let store = Arc::new(AlertStore::new(STORE_CAPACITY, cfg.detection.alert_cooldown_secs));
     // En premier : les alertes rechargées sont dans le store avant que le dashboard ne les serve.
-    let history = if cfg.history.path.is_empty() { None } else { Some(history::spawn(cfg.history.clone(), store.clone(), STORE_CAPACITY)?) };
+    let history =
+        if cfg.history.path.is_empty() { None } else { Some(history::spawn(cfg.history.clone(), store.clone(), STORE_CAPACITY)?) };
     // `triage` est l'émetteur de la file vers le LLM ; None si le LLM est désactivé.
     let triage = if cfg.llm.enabled { Some(llm::spawn(cfg.llm.clone(), store.clone(), stats.clone())?) } else { None };
     let sink = AlertSink::new(store.clone(), triage, cfg.llm.min_severity);

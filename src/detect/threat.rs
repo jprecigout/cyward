@@ -194,7 +194,11 @@ impl ThreatList {
                 ),
             )
         };
-        Alert::new(AlertKind::ThreatListMatch, sev, AlertSource::Network, ts_to_dt(p.ts), title).description(desc).src(p.src).dst(p.dst).evidence(evidence)
+        Alert::new(AlertKind::ThreatListMatch, sev, AlertSource::Network, ts_to_dt(p.ts), title)
+            .description(desc)
+            .src(p.src)
+            .dst(p.dst)
+            .evidence(evidence)
     }
 }
 

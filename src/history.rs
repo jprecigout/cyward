@@ -22,12 +22,7 @@
 
 pub mod repository;
 
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
@@ -76,12 +71,7 @@ pub fn spawn(cfg: HistoryConfig, store: Arc<AlertStore>, restore: usize) -> Resu
     // Purge dès l'ouverture : une limite abaissée dans la configuration s'applique tout de suite.
     let removed = repo.prune(retention.cutoff(Utc::now()), retention.max_alerts)?;
     let alerts = repo.load_recent(restore)?;
-    tracing::info!(
-        "historique {} : {} alerte(s) en base, {} rechargée(s), {removed} purgée(s)",
-        cfg.path,
-        repo.count()?,
-        alerts.len()
-    );
+    tracing::info!("historique {} : {} alerte(s) en base, {} rechargée(s), {removed} purgée(s)", cfg.path, repo.count()?, alerts.len());
     store.restore(alerts, repo.next_id()?);
 
     let events = store.subscribe();
@@ -101,7 +91,12 @@ struct Batch {
 
 /// Tâche de regroupement : suit les événements du store et envoie un lot au thread d'écriture
 /// à chaque période, ou dès qu'il est assez gros.
-async fn watch(store: Arc<AlertStore>, mut events: broadcast::Receiver<AlertEvent>, tx: mpsc::Sender<Batch>, mut stop: mpsc::Receiver<oneshot::Sender<()>>) {
+async fn watch(
+    store: Arc<AlertStore>,
+    mut events: broadcast::Receiver<AlertEvent>,
+    tx: mpsc::Sender<Batch>,
+    mut stop: mpsc::Receiver<oneshot::Sender<()>>,
+) {
     let mut batcher = Batcher::default();
     let mut ticker = tokio::time::interval(FLUSH);
     loop {
