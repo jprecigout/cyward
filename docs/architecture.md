@@ -26,7 +26,10 @@ cyward/
     ├── main.rs                # CLI, assemblage des tâches, boucle du moteur   ⑤ ⑧
     ├── banner.rs              # bannière de démarrage (logo, version, résumé de la config)
     ├── config.rs              # structures de configuration (TOML + valeurs par défaut)
-    ├── alert.rs               # modèle d'alerte, AlertStore, AlertSink         ② ③ ④
+    ├── alert.rs               # modèle d'alerte (types, gravité, constructeur)  ②
+    ├── alert/
+    │   ├── store.rs           # AlertStore : dédoublonnage, diffusion           ④
+    │   └── sink.rs            # AlertSink : point d'entrée unique des alertes   ③
     ├── stats.rs               # compteurs exposés au dashboard
     ├── flows.rs               # résumé du trafic par seconde (onglet Flux)       ④
     ├── capture.rs             # capture live, rejeu pcap, parsing des paquets  ⑤
@@ -96,9 +99,10 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 - Chaque règle implémente `trait LogRule { fn check(&mut self, line: &LogLine, out: &mut Vec<Alert>); }` et garde son propre état. Par exemple, `SshAuth` mémorise par IP l'historique des échecs d'authentification.
 - Une règle à une seule regex et sans état est un `Pattern` : la regex, plus la fonction qui construit l'alerte.
 
-**`alert.rs`** — Builder ② (`Alert`), Façade ③ (`AlertSink`), Observer ④ (`AlertStore`)
-- **`AlertSink`** est le point d'entrée unique des détecteurs. Il enregistre l'alerte et l'envoie en triage IA si sa sévérité le justifie.
-- **`AlertStore`** garde les 5 000 dernières alertes en mémoire. Si l'historique est activé (`[history]`), il les recharge au démarrage (`restore`).
+**`alert.rs`, `alert/store.rs`, `alert/sink.rs`** — Builder ② (`Alert`), Observer ④ (`AlertStore`), Façade ③ (`AlertSink`)
+- **`alert.rs`** porte le modèle de données : `Alert` et son constructeur, `Severity`, `AlertKind`, le triage et la réponse de l'utilisateur. Il réexporte `AlertStore`, `AlertEvent` et `AlertSink` : le reste du code les importe depuis `crate::alert`, sans connaître le découpage.
+- **`AlertSink`** (`alert/sink.rs`) est le point d'entrée unique des détecteurs. Il enregistre l'alerte et l'envoie en triage IA si sa sévérité le justifie.
+- **`AlertStore`** (`alert/store.rs`) garde les 5 000 dernières alertes en mémoire. Si l'historique est activé (`[history]`), il les recharge au démarrage (`restore`).
 - Il **dédoublonne** les alertes selon une empreinte (type + source + cible). Une alerte identique pendant `alert_cooldown_secs` incrémente le compteur `count` de l'alerte existante au lieu d'en créer une nouvelle.
 - Chaque création ou mise à jour est diffusée aux navigateurs connectés.
 
@@ -143,7 +147,7 @@ Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-ut
 
 ## Dépendances entre modules
 
-Les dépendances vont dans un seul sens : les **producteurs** d'alertes (`detect/`, `logs.rs`) ne connaissent pas les **consommateurs** (`llm.rs`, `web.rs`), et inversement. Tous se rejoignent sur `alert.rs`.
+Les dépendances vont dans un seul sens : les **producteurs** d'alertes (`detect/`, `logs.rs`) ne connaissent pas les **consommateurs** (`llm.rs`, `web.rs`), et inversement. Tous se rejoignent sur le module `alert` (`alert.rs` et `alert/`).
 
 | Module | Dépend de | Ne doit jamais dépendre de |
 |---|---|---|
@@ -199,8 +203,8 @@ flowchart LR
 |---|---|---|---|
 | ① | **Strategy** | `trait Detector`, `Engine` (`src/detect/`) ; `trait LogRule`, `LogAnalyzer` (`src/logs/rules.rs`) ; `trait Notifier` (`src/notify/channels.rs`) | Ajouter une détection réseau (y compris l'apprentissage du comportement normal), une règle de log ou un canal de notification sans toucher au code existant |
 | ② | **Builder** | `Alert::new(...).src(...)...` (`src/alert.rs`) | Construire lisiblement une alerte aux nombreux champs optionnels |
-| ③ | **Façade** | `AlertSink::emit` (`src/alert.rs`) ; `Baseline` (`src/anomaly/baseline.rs`) | Un point d'entrée unique qui masque un sous-système : stockage et triage des alertes ; cycle de vie du comportement normal |
-| ④ | **Observer** | `AlertStore` + canal `broadcast` → SSE (`src/alert.rs`, `src/web.rs`), notifications (`src/notify.rs`), historique (`src/history.rs`) ; `FlowHub` → onglets Flux (`src/flows.rs`) | Prévenir un nombre inconnu de navigateurs, le service de notifications et l'historique sur disque à chaque changement ; diffuser le trafic résumé aux onglets ouverts, et savoir quand il n'y en a aucun pour ne rien compter |
+| ③ | **Façade** | `AlertSink::emit` (`src/alert/sink.rs`) ; `Baseline` (`src/anomaly/baseline.rs`) | Un point d'entrée unique qui masque un sous-système : stockage et triage des alertes ; cycle de vie du comportement normal |
+| ④ | **Observer** | `AlertStore` + canal `broadcast` → SSE (`src/alert/store.rs`, `src/web.rs`), notifications (`src/notify.rs`), historique (`src/history.rs`) ; `FlowHub` → onglets Flux (`src/flows.rs`) | Prévenir un nombre inconnu de navigateurs, le service de notifications et l'historique sur disque à chaque changement ; diffuser le trafic résumé aux onglets ouverts, et savoir quand il n'y en a aucun pour ne rien compter |
 | ⑤ | **Producteur/consommateur** | canaux `mpsc` (`main.rs`, `capture.rs`, `logs.rs`, `llm.rs`, `notify.rs`, `history.rs`) | Découpler des étages de vitesses très différentes |
 | ⑥ | **Middleware** | `auth`, `write_guard` (`src/web.rs`) | Appliquer le contrôle d'accès à toutes les routes, et un contrôle renforcé aux routes d'écriture, en un seul endroit |
 | ⑦ | **Superviseur** | `logs::supervise` (`src/logs.rs`) | Relancer une source de logs qui s'arrête |
@@ -272,7 +276,7 @@ C'est la forme idiomatique du Builder en Rust : pas de structure `AlertBuilder` 
 - **Clients** : le moteur de détection (`run_engine`) et l'analyse des logs (`logs::run`).
 
 ```rust
-// src/alert.rs
+// src/alert/sink.rs
 pub fn emit(&self, alert: Alert) {
     // Enregistrement et dédoublonnage : une répétition fusionnée s'arrête là.
     let Some(new) = self.store.push(alert) else { return };
@@ -300,7 +304,7 @@ pub fn emit(&self, alert: Alert) {
 - **Second sujet** : `FlowHub` (`src/flows.rs`), qui diffuse le trafic résumé par seconde aux onglets Flux. Le moteur interroge aussi son nombre d'abonnés : sans observateur, il ne compte rien.
 
 ```rust
-// src/alert.rs — le sujet publie à chaque création ou mise à jour
+// src/alert/store.rs — le sujet publie à chaque création ou mise à jour
 let _ = self.events.send(AlertEvent::New(alert.clone()));
 
 // src/web.rs — chaque navigateur connecté devient un observateur
