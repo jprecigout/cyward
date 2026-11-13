@@ -119,6 +119,15 @@ Dans `.claude/skills/`, à utiliser plutôt que de réinventer la démarche :
 
 Le nombre d'alertes attendues au rejeu est défini par `EXPECTED_TITLES` dans `.claude/skills/verifier/check.sh` : le mettre à jour quand un scénario est ajouté à `examples/gen_attacks.rs`.
 
+## Agents du projet
+
+Dans `.claude/agents/`, sous-agents à qui déléguer une tâche :
+
+| Agent | Rôle |
+|---|---|
+| `dev-rust-senior` | Implémente, corrige ou refactore du code Rust selon les règles de ce fichier (idiomes, commentaires, tests positif et négatif, docs), puis lance `check.sh` |
+| `architecte-logiciel` | Conçoit l'insertion d'une évolution (modules, pattern, dépendances) ou évalue la structure existante ; lecture seule, rend un plan ou un diagnostic |
+
 ## Commandes
 
 ```bash

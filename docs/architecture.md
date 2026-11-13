@@ -16,6 +16,7 @@ cyward/
 │   ├── deploiement.md, tests.md, exploitation.md, securite.md, limites.md
 │   └── conception-normalite.md  # conception de l'apprentissage du comportement normal
 ├── .claude/skills/            # skills : verifier, nouveau-detecteur, nouvelle-regle-log, revue
+├── .claude/agents/            # sous-agents : dev-rust-senior, architecte-logiciel
 ├── assets/
 │   ├── index.html             # dashboard (embarqué dans le binaire à la compilation)
 │   └── logo.svg, logo.png (512 px), logo-wordmark.svg, favicon.svg
