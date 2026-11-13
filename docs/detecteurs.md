@@ -69,6 +69,7 @@ Chaque seuil cité est modifiable dans la [configuration](configuration.md).
 - Il lève une alerte **haute** si le score z dépasse `zscore` (4) **et** si le volume dépasse `min_bytes` (50 Mo). Le second critère évite d'alerter pour un hôte habituellement silencieux qui envoie 2 Mo.
 - L'écart-type est borné vers le bas (25 % de la moyenne, ou 1 Mo au minimum). Sans ce plancher, un hôte très régulier déclencherait au moindre écart.
 - Les périodes sans trafic comptent comme des zéros dans la normale.
+- **Mémoire bornée** : 10 000 hôtes suivis au plus. Au-delà, les hôtes déjà suivis restent comptés, aucun nouveau n'est créé : des paquets aux adresses internes usurpées ne peuvent pas remplir la mémoire. Un hôte silencieux depuis 24 h est oublié et libère sa place ; s'il revient, il refait ses `warmup_buckets` périodes d'apprentissage. Une machine éteinte la nuit garde donc sa normale.
 
 **MITRE :** T1041 (Exfiltration Over C2 Channel), T1567 (Exfiltration Over Web Service).
 

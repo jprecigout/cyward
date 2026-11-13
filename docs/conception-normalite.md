@@ -102,7 +102,7 @@ Toutes les `window_secs` (300 s par défaut), pour chaque machine interne active
 
 - La transformation logarithmique empêche les volumes extrêmes d'écraser le reste.
 - Le couple sinus/cosinus rend 23 h et 0 h proches.
-- Les destinations déjà vues sont mémorisées par machine (2 000 au plus) et persistées.
+- Les destinations déjà vues sont mémorisées par machine (2 000 au plus) et persistées. Une machine n'y reste que tant qu'elle a au moins une fenêtre conservée (voir la rétention ci-dessous) : des adresses usurpées ne s'y accumulent pas.
 
 ### 4.2 Statut d'un échantillon
 

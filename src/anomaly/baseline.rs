@@ -143,7 +143,13 @@ struct State {
     /// `state.json` pour reprendre l'ancien format, où ils y étaient tous réécrits.
     #[serde(skip_serializing)]
     samples: VecDeque<Sample>,
+    /// Destinations déjà vues par machine. Une machine n'y reste que tant qu'elle a au moins une
+    /// fenêtre dans `samples` : des adresses usurpées ne s'y accumulent donc pas au-delà de la rétention.
     seen: HashMap<String, Seen>,
+    /// Nombre de fenêtres conservées par machine, pour savoir quand oublier ses destinations vues.
+    /// Reconstruit à l'ouverture depuis `samples`.
+    #[serde(skip)]
+    windows_per_host: HashMap<String, usize>,
     exceptions: Vec<Exception>,
     decisions: VecDeque<Decision>,
     active_version: Option<u32>,
@@ -176,6 +182,50 @@ struct State {
     /// changé depuis la dernière écriture de `state.json`.
     #[serde(skip)]
     meta_dirty: bool,
+}
+
+impl State {
+    /// Ajoute une fenêtre et applique la rétention. Seul point d'ajout aux échantillons en
+    /// fonctionnement : il tient `windows_per_host` à jour.
+    fn push_sample(&mut self, sample: Sample, cfg: &AnomalyConfig) {
+        match self.windows_per_host.get_mut(&sample.host) {
+            Some(n) => *n += 1,
+            None => {
+                self.windows_per_host.insert(sample.host.clone(), 1);
+            }
+        }
+        self.samples.push_back(sample);
+        for host in enforce_retention(&mut self.samples, cfg) {
+            self.forget_window(&host);
+        }
+    }
+
+    /// Retire une fenêtre du décompte de sa machine ; sans fenêtre restante, ses destinations
+    /// vues sont oubliées.
+    fn forget_window(&mut self, host: &str) {
+        let Some(n) = self.windows_per_host.get_mut(host) else { return };
+        *n -= 1;
+        if *n == 0 {
+            self.windows_per_host.remove(host);
+            if self.seen.remove(host).is_some() {
+                self.meta_dirty = true;
+            }
+        }
+    }
+
+    /// Recompte les fenêtres par machine depuis `samples` (à l'ouverture), et oublie les
+    /// destinations des machines qui n'en ont plus : un état enregistré avant cette règle peut en contenir.
+    fn count_windows(&mut self) {
+        self.windows_per_host.clear();
+        for s in &self.samples {
+            *self.windows_per_host.entry(s.host.clone()).or_default() += 1;
+        }
+        let before = self.seen.len();
+        self.seen.retain(|host, _| self.windows_per_host.contains_key(host));
+        if self.seen.len() != before {
+            self.meta_dirty = true;
+        }
+    }
 }
 
 pub struct Baseline {
@@ -231,6 +281,7 @@ impl Baseline {
             None => {}
         }
         enforce_retention(&mut state.samples, &cfg);
+        state.count_windows();
         if let Some(v) = state.active_version {
             let m = storage.load_model(v)?;
             state.versions.insert(v, m.clone());
@@ -304,8 +355,7 @@ impl Baseline {
         };
         let sample = Sample { host: host.to_string(), start, end, features, status };
         st.pending.push(SampleEvent::Add(sample.clone()));
-        st.samples.push_back(sample);
-        enforce_retention(&mut st.samples, &self.cfg);
+        st.push_sample(sample, &self.cfg);
         verdict
     }
 
@@ -804,6 +854,54 @@ mod tests {
         let many: Vec<String> = (0..3000).map(|i| format!("10.1.{}.{}", i / 256, i % 256)).collect();
         b.new_destinations(B, many.iter().map(String::as_str));
         assert_eq!(b.state.lock().seen[B].order.len(), MAX_SEEN_PER_HOST);
+    }
+
+    // Des machines éphémères (adresses usurpées) ne s'accumulent pas dans les destinations vues :
+    // une machine est oubliée quand sa dernière fenêtre quitte la rétention, pas avant.
+    #[test]
+    fn seen_follows_sample_retention() {
+        let b = Baseline::in_memory(AnomalyConfig { max_samples: 10, ..cfg() });
+        for i in 0..100 {
+            let host = format!("10.9.0.{i}");
+            b.new_destinations(&host, ["198.51.100.1"].into_iter());
+            let s = sample(&host, i, 2.0);
+            b.record_window(&host, s.start, s.end, s.features);
+        }
+        let st = b.state.lock();
+        assert_eq!(st.samples.len(), 10);
+        let mut kept: Vec<&str> = st.seen.keys().map(String::as_str).collect();
+        kept.sort_unstable();
+        assert_eq!(kept, (90..100).map(|i| format!("10.9.0.{i}")).collect::<Vec<_>>());
+    }
+
+    // Une machine qui a encore des fenêtres garde ses destinations vues quand d'autres sont retirées.
+    #[test]
+    fn seen_is_kept_while_windows_remain() {
+        let b = Baseline::in_memory(AnomalyConfig { max_samples: 10, ..cfg() });
+        for i in 0..30 {
+            // A a une fenêtre sur deux, et la plus récente : elle reste dans la rétention.
+            let host = if i % 2 == 0 { format!("10.9.0.{i}") } else { A.to_string() };
+            b.new_destinations(&host, ["198.51.100.1"].into_iter());
+            let s = sample(&host, i, 2.0);
+            b.record_window(&host, s.start, s.end, s.features);
+        }
+        assert_eq!(b.new_destinations(A, ["198.51.100.1"].into_iter()), 0);
+    }
+
+    // À l'ouverture, les destinations des machines sans fenêtre conservée sont oubliées.
+    #[test]
+    fn stale_seen_is_pruned_on_open() {
+        let dir = temp_dir("stale-seen");
+        let c = AnomalyConfig { data_dir: dir.display().to_string(), ..cfg() };
+        let b = Baseline::open(c.clone()).unwrap();
+        feed(&b, 0, 5, 2.0);
+        b.new_destinations(A, ["1.1.1.1"].into_iter());
+        b.new_destinations("10.9.9.9", ["1.1.1.1"].into_iter());
+        b.save().unwrap();
+        let r = Baseline::open(c).unwrap();
+        let st = r.state.lock();
+        assert!(st.seen.contains_key(A));
+        assert!(!st.seen.contains_key("10.9.9.9"));
     }
 
     // Persistance : échantillons, modèle actif, exceptions et destinations vues survivent à un redémarrage.

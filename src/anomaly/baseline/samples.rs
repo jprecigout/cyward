@@ -73,13 +73,18 @@ pub(super) fn replay(events: Vec<SampleEvent>) -> VecDeque<Sample> {
 }
 
 /// Rétention des échantillons : par ancienneté (temps des paquets, par rapport au plus
-/// récent), puis par nombre.
-pub(super) fn enforce_retention(samples: &mut VecDeque<Sample>, cfg: &AnomalyConfig) {
-    let Some(last) = samples.back().map(|s| s.end) else { return };
+/// récent), puis par nombre. Renvoie la machine de chaque fenêtre retirée, pour que l'état qui
+/// en dépend (destinations vues) suive la même rétention.
+pub(super) fn enforce_retention(samples: &mut VecDeque<Sample>, cfg: &AnomalyConfig) -> Vec<String> {
+    let mut removed = Vec::new();
+    let Some(last) = samples.back().map(|s| s.end) else { return removed };
     let oldest = last - cfg.retention_days * 86_400.0;
     while samples.front().is_some_and(|s| s.end < oldest) || samples.len() > cfg.max_samples {
-        samples.pop_front();
+        if let Some(s) = samples.pop_front() {
+            removed.push(s.host);
+        }
     }
+    removed
 }
 
 /// Vrai si le journal doit être réécrit : demandé explicitement, ou plus de deux fois plus
@@ -133,7 +138,7 @@ mod tests {
         let cfg = AnomalyConfig { retention_days: 1.0, max_samples: 2, ..Default::default() };
         // Fenêtres de 300 s : 400 fenêtres couvrent plus d'un jour.
         let mut s: VecDeque<Sample> = (0..400).map(|i| sample("10.0.0.1", i, 1.0)).collect();
-        enforce_retention(&mut s, &cfg);
+        assert_eq!(enforce_retention(&mut s, &cfg).len(), 398);
         assert_eq!(s.len(), 2);
         assert_eq!(s.back().unwrap().start, 399.0 * 300.0);
         assert!((covered_hours(&s) - 600.0 / 3600.0).abs() < 1e-9);
