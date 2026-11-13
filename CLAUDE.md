@@ -28,6 +28,7 @@ Toute modification de code doit être **bien structurée**, **commentée** et **
 | `history.rs` (et `history/repository.rs`) | `alert`, `config` |
 
   Les producteurs d'alertes (`detect/`, `logs.rs`) ne dépendent jamais des consommateurs (`llm`, `web`), et inversement. `anomaly/` (apprentissage du comportement normal) ne dépend ni de `detect`, ni de `llm`, ni de `web` : ce sont eux qui l'utilisent. Seul `main.rs` assemble le tout (racine de composition).
+- **Un module à sous-fichiers s'écrit `nom.rs` + `nom/`** (forme recommandée par Rust depuis l'édition 2018), jamais `nom/mod.rs` : `alert.rs` + `alert/store.rs`, `detect.rs` + `detect/scan.rs`.
 - **Logique pure séparée des entrées/sorties** : le parsing et la décision (`parse_packet`, `parse_dns_query`, `LogAnalyzer::analyze`, `parse_analysis`, les détecteurs, et dans `anomaly/` les caractéristiques, l'Isolation Forest et le diff) ne font aucune I/O. C'est ce qui les rend testables sans réseau, sans fichier, sans LLM. Les I/O (sockets, sous-processus, HTTP) restent en bordure.
 - **Favoriser les design patterns déjà en place**, et en réutiliser un plutôt que d'inventer une nouvelle mécanique :
 
@@ -191,7 +192,7 @@ Points qui demandent de lire plusieurs fichiers pour être compris :
 
 ## Ajouter un détecteur réseau
 
-1. Créer `src/detect/<nom>.rs` qui implémente `Detector` (`on_packet`, et `tick` pour la purge et la clôture des fenêtres), puis l'enregistrer dans `Engine::new` (`detect/mod.rs`).
+1. Créer `src/detect/<nom>.rs` qui implémente `Detector` (`on_packet`, et `tick` pour la purge et la clôture des fenêtres), puis l'enregistrer dans `Engine::new` (`detect.rs`).
 2. Ajouter sa struct de config dans `config.rs`. Toutes les structs ont `#[serde(default)]` et un `impl Default` qui porte les valeurs par défaut ; reporter la section dans `config.example.toml`.
 3. Ajouter si besoin une variante à `AlertKind`. Elle est sérialisée en snake_case, et le dashboard l'affiche en remplaçant `_` par un espace.
 4. Tester avec `detect::testutil::{syn, dns}` (constructeurs de `PacketMeta`), y compris un cas négatif. Ajouter éventuellement le scénario à `examples/gen_attacks.rs`.

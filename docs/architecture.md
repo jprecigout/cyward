@@ -33,8 +33,8 @@ cyward/
     ├── stats.rs               # compteurs exposés au dashboard
     ├── flows.rs               # résumé du trafic par seconde (onglet Flux)       ④
     ├── capture.rs             # capture live, rejeu pcap, parsing des paquets  ⑤
+    ├── detect.rs              # trait Detector et moteur                       ①
     ├── detect/
-    │   ├── mod.rs             # trait Detector et moteur                       ①
     │   ├── scan.rs            # scan, balayage, force brute, inondation SYN    ①
     │   ├── beacon.rs          # balises périodiques (C2)                       ①
     │   ├── volume.rs          # volume sortant anormal (exfiltration)          ①
@@ -42,7 +42,8 @@ cyward/
     │   ├── threat.rs          # trafic avec des IP de listes de menaces        ①
     │   ├── arp.rs             # usurpation ARP (homme du milieu)               ①
     │   └── anomaly.rs         # écarts au comportement normal appris           ①
-    ├── anomaly/               # apprentissage du comportement normal
+    ├── anomaly.rs             # apprentissage du comportement normal (racine du module)
+    ├── anomaly/
     │   ├── features.rs        # 12 caractéristiques par machine et par fenêtre
     │   ├── iforest.rs         # Isolation Forest (sans dépendance)
     │   ├── model.rs           # échantillons et modèles versionnés
@@ -68,6 +69,8 @@ cyward/
 ```
 
 Les numéros en fin de ligne renvoient aux [design patterns](#design-patterns-utilisés) mis en œuvre dans le fichier.
+
+Un module à sous-fichiers suit la forme recommandée par Rust depuis l'édition 2018 : sa racine est `nom.rs`, ses sous-modules sont dans `nom/` (par exemple `detect.rs` et `detect/scan.rs`). Aucun fichier ne s'appelle `mod.rs`.
 
 ## Les composants
 
@@ -221,7 +224,7 @@ flowchart LR
 - **Contexte** : `Engine`, qui détient les stratégies sous forme de `Box<dyn Detector>` et leur distribue chaque paquet sans savoir ce qu'elles font.
 
 ```rust
-// src/detect/mod.rs — l'interface commune
+// src/detect.rs — l'interface commune
 pub trait Detector: Send {
     fn on_packet(&mut self, p: &PacketMeta, out: &mut Vec<Alert>);
     fn tick(&mut self, _now: f64, _out: &mut Vec<Alert>) {}

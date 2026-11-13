@@ -23,7 +23,7 @@ Si l'information nécessaire n'est pas dans `PacketMeta`, l'ajouter dans `src/ca
 
 1. **Configuration** (`src/config.rs`) : une struct `XxxConfig` avec `#[derive(Debug, Clone, Deserialize)]`, `#[serde(default)]`, un `///` par champ (avec l'unité) et un `impl Default` qui porte les valeurs par défaut. L'ajouter comme champ de `DetectionConfig` et dans son `Default`.
 2. **Type d'alerte** (`src/alert.rs`) : une variante de `AlertKind` avec son `///`. Elle est sérialisée en snake_case dans l'API et le dashboard.
-3. **Détecteur** : `src/detect/<nom>.rs`, sur le modèle ci-dessous. Le déclarer (`mod <nom>;`) et l'ajouter à la liste de `Engine::new` dans `src/detect/mod.rs`.
+3. **Détecteur** : `src/detect/<nom>.rs`, sur le modèle ci-dessous. Le déclarer (`mod <nom>;`) et l'ajouter à la liste de `Engine::new` dans `src/detect.rs`.
 4. **Tests** dans le module : au moins un cas positif (l'attaque est détectée, une seule fois) et un cas négatif (un trafic normal proche ne déclenche rien). Utiliser `crate::detect::testutil::{syn, dns}` ou construire un `PacketMeta`.
 5. **Scénario de simulation** dans `examples/gen_attacks.rs` : ajouter l'attaque au scénario (les paquets sont triés à l'écriture). Ajouter la sous-chaîne de son titre dans `EXPECTED_TITLES` de `.claude/skills/verifier/check.sh`.
 6. **Configuration d'exemple** : la section `[detection.<nom>]` dans `config.example.toml`, avec les valeurs par défaut et un commentaire par clé.
